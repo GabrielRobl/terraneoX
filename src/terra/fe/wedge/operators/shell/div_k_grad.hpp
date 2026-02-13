@@ -15,12 +15,7 @@
 
 namespace terra::fe::wedge::operators::shell {
 
-auto dummy_lambda = KOKKOS_LAMBDA( const double x, const double y, const double z )
-{
-    return 0;
-};
-
-template < typename ScalarT, typename KFunction >
+template < typename ScalarT >
 class DivKGrad
 {
   public:
@@ -28,23 +23,19 @@ class DivKGrad
     using DstVectorType                 = linalg::VectorQ1Scalar< ScalarT >;
     using ScalarType                    = ScalarT;
     static constexpr int LocalMatrixDim = 6;
-    using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, LocalMatrixDim, LocalMatrixDim, 2 >;
-    using LocalMatrixStorage      = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
+    using LocalMatrixStorage            = linalg::solvers::LocalMatrixStorage< ScalarType, LocalMatrixDim >;
 
   private:
     LocalMatrixStorage local_matrix_storage_;
 
     bool single_quadpoint_ = false;
-    bool k_function_eval   = false;
 
     grid::shell::DistributedDomain domain_;
 
-    grid::Grid3DDataVec< ScalarT, 3 >    grid_;
-    grid::Grid2DDataScalar< ScalarT >    radii_;
-    grid::Grid4DDataScalar< ScalarType > k_;
-    KFunction                            k_function_;
+    grid::Grid3DDataVec< ScalarT, 3 >                        grid_;
+    grid::Grid2DDataScalar< ScalarT >                        radii_;
+    grid::Grid4DDataScalar< ScalarType >                     k_;
     grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > mask_;
-
 
     bool treat_boundary_;
     bool diagonal_;
@@ -66,16 +57,15 @@ class DivKGrad
 
   public:
     DivKGrad(
-        const grid::shell::DistributedDomain&       domain,
-        const grid::Grid3DDataVec< ScalarT, 3 >&    grid,
-        const grid::Grid2DDataScalar< ScalarT >&    radii,
+        const grid::shell::DistributedDomain&                           domain,
+        const grid::Grid3DDataVec< ScalarT, 3 >&                        grid,
+        const grid::Grid2DDataScalar< ScalarT >&                        radii,
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
-        const grid::Grid4DDataScalar< ScalarType >& k,
-        KFunction                                   k_function,
-        bool                                        treat_boundary,
-        bool                                        diagonal,
-        linalg::OperatorApplyMode                   operator_apply_mode = linalg::OperatorApplyMode::Replace,
-        linalg::OperatorCommunicationMode           operator_communication_mode =
+        const grid::Grid4DDataScalar< ScalarType >&                     k,
+        bool                                                            treat_boundary,
+        bool                                                            diagonal,
+        linalg::OperatorApplyMode         operator_apply_mode = linalg::OperatorApplyMode::Replace,
+        linalg::OperatorCommunicationMode operator_communication_mode =
             linalg::OperatorCommunicationMode::CommunicateAdditively,
         linalg::OperatorStoredMatrixMode operator_stored_matrix_mode = linalg::OperatorStoredMatrixMode::Off )
     : domain_( domain )
@@ -83,7 +73,6 @@ class DivKGrad
     , radii_( radii )
     , mask_( mask )
     , k_( k )
-    , k_function_( k_function )
     , treat_boundary_( treat_boundary )
     , diagonal_( diagonal )
     , operator_apply_mode_( operator_apply_mode )
@@ -138,9 +127,9 @@ class DivKGrad
     void set_single_quadpoint( bool v ) { single_quadpoint_ = v; }
 
     void set_stored_matrix_mode(
-        linalg::OperatorStoredMatrixMode                      operator_stored_matrix_mode,
-        std::optional< int >                                  level_range,
-        std::optional< grid::Grid4DDataScalar< ScalarType > > GCAElements )
+        linalg::OperatorStoredMatrixMode     operator_stored_matrix_mode,
+        int                                  level_range,
+        grid::Grid4DDataScalar< ScalarType > GCAElements )
     {
         operator_stored_matrix_mode_ = operator_stored_matrix_mode;
 
@@ -360,36 +349,12 @@ class DivKGrad
 
                     // dot of coeff dofs and element-local shape functions to evaluate the coefficent on the current element
                     ScalarType k_eval = 0.0;
-                    if ( !k_function_eval )
+
+                    for ( int k = 0; k < num_nodes_per_wedge; k++ )
                     {
-                        for ( int k = 0; k < num_nodes_per_wedge; k++ )
-                        {
-                            k_eval += shape( k, qp ) * k_local_hex[wedge]( k );
-                        }
+                        k_eval += shape( k, qp ) * k_local_hex[wedge]( k );
                     }
-                    else
-                    {
-                        constexpr int offset_x[2][6] = { { 0, 1, 0, 0, 1, 0 }, { 1, 0, 1, 1, 0, 1 } };
-                        constexpr int offset_y[2][6] = { { 0, 0, 1, 0, 0, 1 }, { 1, 1, 0, 1, 1, 0 } };
-                        constexpr int offset_r[2][6] = { { 0, 0, 0, 1, 1, 1 }, { 0, 0, 0, 1, 1, 1 } };
-                        assert( single_quadpoint_ );
-                        dense::Vec< ScalarType, 3 > qp_physical = { 0, 0, 0 };
-                        for ( int k = 0; k < num_nodes_per_wedge; k++ )
-                        {
-                            qp_physical = qp_physical + grid::shell::coords(
-                                                            local_subdomain_id,
-                                                            x_cell + offset_x[wedge][k],
-                                                            y_cell + offset_y[wedge][k],
-                                                            r_cell + offset_r[wedge][k],
-                                                            grid_,
-                                                            radii_ );
-                        }
-                        // evaluate at the middle of the element for now
-                        k_eval = k_function_(
-                            qp_physical( 0 ) / num_nodes_per_wedge,
-                            qp_physical( 1 ) / num_nodes_per_wedge,
-                            qp_physical( 2 ) / num_nodes_per_wedge );
-                    }
+
                     jdet_keval_quadweight *= k_eval;
 
                     fused_local_mv( src_local_hex, dst_local_hex, wedge, jdet_keval_quadweight, grad, r_cell );
@@ -472,36 +437,12 @@ class DivKGrad
 
             // dot of coeff dofs and element-local shape functions to evaluate the coefficent on the current element
             ScalarType k_eval = 0.0;
-            if ( !k_function_eval )
+
+            for ( int k = 0; k < num_nodes_per_wedge; k++ )
             {
-                for ( int k = 0; k < num_nodes_per_wedge; k++ )
-                {
-                    k_eval += shape( k, qp ) * k_local_hex[wedge]( k );
-                }
+                k_eval += shape( k, qp ) * k_local_hex[wedge]( k );
             }
-            else
-            {
-                constexpr int offset_x[2][6] = { { 0, 1, 0, 0, 1, 0 }, { 1, 0, 1, 1, 0, 1 } };
-                constexpr int offset_y[2][6] = { { 0, 0, 1, 0, 0, 1 }, { 1, 1, 0, 1, 1, 0 } };
-                constexpr int offset_r[2][6] = { { 0, 0, 0, 1, 1, 1 }, { 0, 0, 0, 1, 1, 1 } };
-                assert( single_quadpoint_ );
-                dense::Vec< ScalarType, 3 > qp_physical = { 0, 0, 0 };
-                for ( int k = 0; k < num_nodes_per_wedge; k++ )
-                {
-                    qp_physical = qp_physical + grid::shell::coords(
-                                                    local_subdomain_id,
-                                                    x_cell + offset_x[wedge][k],
-                                                    y_cell + offset_y[wedge][k],
-                                                    r_cell + offset_r[wedge][k],
-                                                    grid_,
-                                                    radii_ );
-                }
-                // evaluate at the middle of the element for now
-                k_eval = k_function_(
-                    qp_physical( 0 ) / num_nodes_per_wedge,
-                    qp_physical( 1 ) / num_nodes_per_wedge,
-                    qp_physical( 2 ) / num_nodes_per_wedge );
-            }
+
             jdet_keval_quadweight *= k_eval;
 
             // propagate on local matrix by outer product of test and trial vecs
@@ -628,7 +569,7 @@ class DivKGrad
     }
 };
 
-static_assert( linalg::GCACapable< DivKGrad< float, decltype(dummy_lambda) > > );
-static_assert( linalg::GCACapable< DivKGrad< double, decltype(dummy_lambda) > > );
+static_assert( linalg::GCACapable< DivKGrad< float > > );
+static_assert( linalg::GCACapable< DivKGrad< double > > );
 
 } // namespace terra::fe::wedge::operators::shell

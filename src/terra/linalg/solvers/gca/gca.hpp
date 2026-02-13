@@ -60,26 +60,34 @@ class TwoGridGCA
     InterpolationMode                    interpolation_mode_;
 
   public:
+    /// @brief GCA Ctor
+    /// Assembles Galerkin coarse-grid operators in the coarse-op passed.
+    /// @param fine_op: operator on the finer grid to derive the coarse-grid operators from
+    /// @param coarse_op: operator on the coarser grid to store the coarse-grid operators in
+    /// @param level_range: max_level - min_level range used in the app: required check whether a certain element
+    ///                     is a child of a GCA element.
+    /// @param GCAElements: map of coarsest-grid elements, on which GCA should be used. Using this and level_range,
+    ///                     the GCA can check for a certain element whether it is a child of a marked coarsest-grid 
+    ///                     element. If that is the case, GCA is applied to it.
     explicit TwoGridGCA(
-        Operator                                              fine_op,
-        Operator                                              coarse_op,
-        std::optional< int >                                  level_range,
-        std::optional< grid::Grid4DDataScalar< ScalarType > > GCAElements,
-        bool                                                  treat_boundary     = true,
-        InterpolationMode                                     interpolation_mode = InterpolationMode::Constant )
+        Operator                             fine_op,
+        Operator                             coarse_op,
+        int                                  level_range,
+        grid::Grid4DDataScalar< ScalarType > GCAElements,
+        bool                                 treat_boundary     = true,
+        InterpolationMode                    interpolation_mode = InterpolationMode::Constant )
     : domain_fine_( fine_op.get_domain() )
     , fine_op_( fine_op )
     , coarse_op_( coarse_op )
     , grid_fine_( fine_op.get_grid() )
     , radii_fine_( fine_op.get_radii() )
     , radii_coarse_( coarse_op.get_radii() )
+    , GCAElements_( GCAElements )
+    , level_range_( level_range )
     , treat_boundary_( treat_boundary )
     , interpolation_mode_( interpolation_mode )
     {
-        assert( coarse_op_.get_stored_matrix_mode() != linalg::OperatorStoredMatrixMode::Off );
-
-        GCAElements_ = GCAElements.value();
-        level_range_ = level_range.value();
+        // assert( coarse_op_.get_stored_matrix_mode() != linalg::OperatorStoredMatrixMode::Off );
 
         // this probably cant not happen
         if ( coarse_op.get_domain().subdomains().size() != domain_fine_.subdomains().size() )
@@ -423,13 +431,10 @@ class TwoGridGCA
                     {
                         Kokkos::abort( "Unexpected path." );
                     }
-
-                   
                 }
             }
 
-            
-
+            // bc treatment moved to ops, will be revisited during freeslip impl
             if ( false )
             {
                 dense::Mat< ScalarT, Operator::LocalMatrixDim, Operator::LocalMatrixDim > boundary_mask;

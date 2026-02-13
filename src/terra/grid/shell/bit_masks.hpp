@@ -1,6 +1,8 @@
 
 
 #pragma once
+#include <Kokkos_UnorderedMap.hpp>
+
 #include "terra/util/bit_masking.hpp"
 
 namespace terra::grid::shell {
@@ -17,6 +19,61 @@ enum class ShellBoundaryFlag : uint8_t
 };
 
 static_assert( util::FlagLike< ShellBoundaryFlag > );
+
+/// \ref FlagLike that indicates the type of boundary condition
+enum class BoundaryConditionFlag : uint8_t
+{
+    NEUMANN   = 0, // not sure we need this one, implemented as teat_boundary == false in operators
+    DIRICHLET = 1,
+    FREESLIP  = 2,
+};
+
+struct BoundaryConditionMapping
+{
+    ShellBoundaryFlag     sbf;
+    BoundaryConditionFlag bcf;
+};
+
+using BoundaryConditions = BoundaryConditionMapping[2];
+
+/// @brief Retrieve the boundary condition flag that is associated with a location in the shell
+///        e.g. SURFACE -> DIRICHLET
+KOKKOS_INLINE_FUNCTION
+BoundaryConditionFlag get_boundary_condition_flag( const BoundaryConditions bcs, ShellBoundaryFlag sbf )
+{
+    for ( int i = 0; i < 2; ++i ) // might become larger for more bc types
+    {
+        if ( bcs[i].sbf == sbf )
+            return bcs[i].bcf;
+    }
+    return BoundaryConditionFlag::NEUMANN;
+}
+
+/// @brief Set the boundary condition flag that is associated with a location in the shell
+///        e.g. SURFACE -> DIRICHLET
+KOKKOS_INLINE_FUNCTION
+void set_boundary_condition_flag( BoundaryConditions& bcs, ShellBoundaryFlag sbf, BoundaryConditionFlag bcf )
+{
+    for ( auto& [_sbf, _bcf] : bcs ) // might become larger for more bc types
+    {
+        if ( _sbf == sbf )
+        {
+            _bcf = bcf;
+        }
+    }
+}
+
+/// @brief Retrieve the ShellBoundary flag associated with a certain boundary condition type/flag
+KOKKOS_INLINE_FUNCTION
+ShellBoundaryFlag get_shell_boundary_flag( const BoundaryConditions bcs, BoundaryConditionFlag bcf )
+{
+    for ( int i = 0; i < 2; ++i ) // might become larger for more bc types
+    {
+        if ( bcs[i].bcf == bcf )
+            return bcs[i].sbf;
+    }
+    return ShellBoundaryFlag::NO_FLAG;
+}
 
 /// @brief Set up mask data for a distributed shell domain.
 /// The mask encodes boundary information for each grid node.

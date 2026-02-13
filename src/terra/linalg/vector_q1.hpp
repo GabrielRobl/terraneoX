@@ -119,10 +119,10 @@ class VectorQ1Scalar
     /// @return Maximum absolute value.
     ScalarType max_abs_entry_impl() const { return kernels::common::max_abs_entry( grid_data_ ); }
 
-    /// @brief NaN check implementation for VectorLike concept.
-    /// Returns true if any entry of grid_data is NaN.
-    /// @return True if NaN is present.
-    bool has_nan_impl() const { return kernels::common::has_nan( grid_data_ ); }
+    /// @brief NaN/inf check implementation for VectorLike concept.
+    /// Returns true if any entry of grid_data is NaN/inf.
+    /// @return True if NaN/inf is present.
+    bool has_nan_or_inf_impl() const { return kernels::common::has_nan_or_inf( grid_data_ ); }
 
     /// @brief Swap implementation for VectorLike concept.
     /// Exchanges grid_data and mask_data with another vector.
@@ -262,10 +262,10 @@ class VectorQ1Vec
     /// @return Maximum absolute value.
     ScalarType max_abs_entry_impl() const { return kernels::common::max_abs_entry( grid_data_ ); }
 
-    /// @brief NaN check implementation for VectorLike concept.
-    /// Returns true if any entry of grid_data is NaN.
-    /// @return True if NaN is present.
-    bool has_nan_impl() const { return kernels::common::has_nan( grid_data_ ); }
+    /// @brief NaN/inf check implementation for VectorLike concept.
+    /// Returns true if any entry of grid_data is NaN/inf.
+    /// @return True if NaN/inf is present.
+    bool has_nan_or_inf_impl() const { return kernels::common::has_nan_or_inf( grid_data_ ); }
 
     /// @brief Swap implementation for VectorLike concept.
     /// Exchanges grid_data and mask_data with another vector.

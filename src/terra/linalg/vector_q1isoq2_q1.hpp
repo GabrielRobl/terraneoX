@@ -109,10 +109,10 @@ class VectorQ1IsoQ2Q1
         return std::max( block_1().max_abs_entry_impl(), block_2().max_abs_entry_impl() );
     }
 
-    /// @brief NaN check implementation for Block2VectorLike concept.
-    /// Returns true if any entry of either block is NaN.
-    /// @return True if NaN is present.
-    bool has_nan_impl() const { return block_1().has_nan_impl() || block_2().has_nan_impl(); }
+    /// @brief NaN/inf check implementation for Block2VectorLike concept.
+    /// Returns true if any entry of either block is NaN/inf.
+    /// @return True if NaN/inf is present.
+    bool has_nan_or_inf_impl() const { return block_1().has_nan_or_inf_impl() || block_2().has_nan_or_inf_impl(); }
 
     /// @brief Swap implementation for Block2VectorLike concept.
     /// Exchanges the contents of both blocks with another block vector.

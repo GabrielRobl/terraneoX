@@ -101,7 +101,8 @@ void test( int level, const std::shared_ptr< util::Table >& table )
 
     const auto domain = DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, 0.5, 1.0 );
 
-    auto mask_data = grid::setup_node_ownership_mask_data( domain );
+    auto mask_data          = grid::setup_node_ownership_mask_data( domain );
+    auto boundary_mask_data = grid::shell::setup_boundary_mask_data( domain );
 
     VectorQ1Scalar< ScalarType > T( "T", domain, mask_data );
     VectorQ1Scalar< ScalarType > f( "f", domain, mask_data );
@@ -122,7 +123,7 @@ void test( int level, const std::shared_ptr< util::Table >& table )
 
     using AD = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPG< ScalarType >;
 
-    AD A( domain, subdomain_shell_coords, subdomain_radii, u, 1e-3, 1e-2, false, false, 1.0 );
+    AD A( domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, u, 1e-3, 1e-2, false, false, 1.0 );
 
     using Mass = fe::wedge::operators::shell::Mass< ScalarType >;
 

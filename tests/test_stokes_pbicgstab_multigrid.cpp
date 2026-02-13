@@ -9,6 +9,7 @@
 #include "fe/wedge/operators/shell/stokes.hpp"
 #include "fe/wedge/operators/shell/vector_laplace_simple.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
+#include "grid/shell/bit_masks.hpp"
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
 #include "linalg/solvers/jacobi.hpp"
 #include "linalg/solvers/multigrid.hpp"
@@ -40,6 +41,14 @@ using grid::shell::SubdomainInfo;
 using linalg::VectorQ1IsoQ2Q1;
 using linalg::VectorQ1Scalar;
 using linalg::VectorQ1Vec;
+using grid::shell::BoundaryConditions;
+using grid::shell::BoundaryConditionFlag::DIRICHLET;
+using grid::shell::BoundaryConditionFlag::FREESLIP;
+using grid::shell::BoundaryConditionFlag::NEUMANN;
+using grid::shell::ShellBoundaryFlag::BOUNDARY;
+using grid::shell::ShellBoundaryFlag::CMB;
+using grid::shell::ShellBoundaryFlag::SURFACE;
+
 
 #define SOLUTION_TYPE 1
 
@@ -295,7 +304,14 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
         kernels::common::count_masked< long >( mask_data[num_levels - 2], grid::NodeOwnershipFlag::OWNED );
 
     // Set up operators.
-
+    BoundaryConditions bcs = {
+        { CMB, DIRICHLET },
+        { SURFACE, DIRICHLET },
+    };
+    BoundaryConditions bcs_neumann = {
+        { CMB, NEUMANN },
+        { SURFACE, NEUMANN },
+    };
     using Stokes      = fe::wedge::operators::shell::Stokes< ScalarType >;
     using Viscous     = Stokes::Block11Type;
     using ViscousMass = fe::wedge::operators::shell::VectorMass< ScalarType >;
@@ -308,7 +324,8 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
         domains[pressure_level],
         coords_shell[velocity_level],
         coords_radii[velocity_level],
-        true,
+        boundary_mask_data[velocity_level],
+        bcs,
         false );
 
     Stokes K_neumann(
@@ -316,7 +333,8 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
         domains[pressure_level],
         coords_shell[velocity_level],
         coords_radii[velocity_level],
-        false,
+        boundary_mask_data[velocity_level],
+        bcs_neumann,
         false );
 
     Stokes K_neumann_diag(
@@ -324,7 +342,8 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
         domains[pressure_level],
         coords_shell[velocity_level],
         coords_radii[velocity_level],
-        false,
+        boundary_mask_data[velocity_level],
+        bcs_neumann,
         true );
 
     ViscousMass M( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], false );
@@ -340,7 +359,8 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
 
     for ( int level = 0; level < num_levels; level++ )
     {
-        A_diag.emplace_back( domains[level], coords_shell[level], coords_radii[level], true, true );
+        A_diag.emplace_back(
+            domains[level], coords_shell[level], coords_radii[level], boundary_mask_data[level], bcs, true );
 
         inverse_diagonals.emplace_back(
             "inverse_diagonal_" + std::to_string( level ), domains[level], mask_data[level] );
@@ -354,7 +374,8 @@ std::pair< double, double > test( int min_level, int max_level, const std::share
 
         if ( level < num_levels - 1 )
         {
-            A_c.emplace_back( domains[level], coords_shell[level], coords_radii[level], true, false );
+            A_c.emplace_back(
+                domains[level], coords_shell[level], coords_radii[level], boundary_mask_data[level], bcs, false );
             P.emplace_back( linalg::OperatorApplyMode::Add );
             R.emplace_back( domains[level] );
         }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "solver.hpp"
+#include "linalg/operator.hpp"
 
 namespace terra::linalg::solvers {
 

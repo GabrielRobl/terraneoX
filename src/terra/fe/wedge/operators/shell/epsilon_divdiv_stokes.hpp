@@ -12,6 +12,7 @@
 #include "util/timer.hpp"
 #include "zero.hpp"
 
+using terra::grid::shell::BoundaryConditions;
 namespace terra::fe::wedge::operators::shell {
 
 template < typename ScalarT, int VecDim = 3 >
@@ -37,17 +38,17 @@ class EpsDivDivStokes
 
   public:
     EpsDivDivStokes(
-        const grid::shell::DistributedDomain&       domain_fine,
-        const grid::shell::DistributedDomain&       domain_coarse,
-        const grid::Grid3DDataVec< ScalarType, 3 >& grid,
-        const grid::Grid2DDataScalar< ScalarType >& radii,
+        const grid::shell::DistributedDomain&                           domain_fine,
+        const grid::shell::DistributedDomain&                           domain_coarse,
+        const grid::Grid3DDataVec< ScalarType, 3 >&                     grid,
+        const grid::Grid2DDataScalar< ScalarType >&                     radii,
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
-        const grid::Grid4DDataScalar< ScalarType >& k,
-        bool                                        treat_boundary,
-        bool                                        diagonal )
-    : A_( domain_fine, grid, radii, mask, k, treat_boundary, diagonal )
-    , B_T_( domain_fine, domain_coarse, grid, radii, treat_boundary )
-    , B_( domain_fine, domain_coarse, grid, radii, treat_boundary )
+        const grid::Grid4DDataScalar< ScalarType >&                     k,
+        BoundaryConditions                                              bcs,
+        bool                                                            diagonal )
+    : A_( domain_fine, grid, radii, mask, k, bcs, diagonal )
+    , B_T_( domain_fine, domain_coarse, grid, radii, mask, bcs )
+    , B_( domain_fine, domain_coarse, grid, radii, mask, bcs )
     , diagonal_( diagonal )
     {}
 

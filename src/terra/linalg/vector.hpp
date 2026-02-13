@@ -34,8 +34,8 @@ concept VectorLike = requires(
     // Required max magnitude
     { self_const.max_abs_entry_impl() } -> std::same_as< typename T::ScalarType >;
 
-    // Required nan check
-    { self_const.has_nan_impl() } -> std::same_as< bool >;
+    // Required nan/inf check
+    { self_const.has_nan_or_inf_impl() } -> std::same_as< bool >;
 
     // Required swap operation
     { self.swap_impl( x_non_const ) } -> std::same_as< void >;
@@ -181,14 +181,14 @@ ScalarOf< Vector > norm_2_scaled( const Vector& y, const ScalarOf< Vector >& sca
     return std::sqrt( dot_prod * scaling_factor_under_the_root );
 }
 
-/// @brief Check if a vector contains NaN entries.
-/// Returns true if any entry of \f$ y \f$ is NaN.
+/// @brief Check if a vector contains NaN or inf entries.
+/// Returns true if any entry of \f$ y \f$ is NaN or inf.
 /// @param y Input vector.
-/// @return True if NaN is present, false otherwise.
+/// @return True if NaN or inf is present, false otherwise.
 template < VectorLike Vector >
-bool has_nan( const Vector& y )
+bool has_nan_or_inf( const Vector& y )
 {
-    return y.has_nan_impl();
+    return y.has_nan_or_inf_impl();
 }
 
 /// @brief Swap the contents of two vectors.
@@ -240,7 +240,7 @@ class DummyVector
     ScalarType max_abs_entry_impl() const { return 0; }
 
     /// @brief Dummy implementation of NaN check.
-    bool has_nan_impl() const { return false; }
+    bool has_nan_or_inf_impl() const { return false; }
 
     /// @brief Dummy implementation of swap.
     void swap_impl( DummyVector< ScalarType >& other ) { (void) other; }
@@ -291,7 +291,7 @@ class DummyBlock2Vector
     ScalarType max_abs_entry_impl() const { return 0; }
 
     /// @brief Dummy implementation of NaN check.
-    bool has_nan_impl() const { return false; }
+    bool has_nan_or_inf_impl() const { return false; }
 
     /// @brief Dummy implementation of swap.
     void swap_impl( DummyBlock2Vector& other ) { (void) other; }

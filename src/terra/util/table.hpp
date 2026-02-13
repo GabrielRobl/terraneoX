@@ -288,6 +288,12 @@ class Table
     /// @return Reference to this table.
     const Table& print_pretty( std::ostream& os = logroot ) const
     {
+        if ( columns_.empty() || rows_.empty() )
+        {
+            os << "Empty table.\n";
+            return *this;
+        }
+
         if ( mpi::rank() == 0 )
         {
             std::unordered_map< std::string, size_t > widths;

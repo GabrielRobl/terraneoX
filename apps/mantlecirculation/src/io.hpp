@@ -68,10 +68,14 @@ inline Result<> compute_and_write_radial_profiles(
         shell::radial_profiles(
             scalar_function, subdomain_shell_idx, static_cast< int >( domain.domain_info().radii().size() ) ),
         domain.domain_info().radii() );
-    std::ofstream out(
-        io_parameters.outdir + "/" + io_parameters.radial_profiles_out_dir + "/radial_profiles_" +
-        scalar_function.grid_data().label() + "_" + std::to_string( timestep ) + ".csv" );
-    profiles.print_csv( out );
+
+    if ( mpi::rank() == 0 )
+    {
+        std::ofstream out(
+            io_parameters.outdir + "/" + io_parameters.radial_profiles_out_dir + "/radial_profiles_" +
+            scalar_function.grid_data().label() + "_" + std::to_string( timestep ) + ".csv" );
+        profiles.print_csv( out );
+    }
 
     return { Ok{} };
 }

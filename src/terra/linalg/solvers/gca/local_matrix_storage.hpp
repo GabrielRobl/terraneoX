@@ -60,24 +60,22 @@ class LocalMatrixStorage
 
         // only required for selective storage: level range for mapping from marked coarse elements
         // to domain at hand
-        std::optional< int > level_range,
+        int  level_range,
         // marked coarse elements
-        std::optional< grid::Grid4DDataScalar< ScalarType > > GCAElements )
+        grid::Grid4DDataScalar< ScalarType >  GCAElements )
     : operator_stored_matrix_mode_( operator_stored_matrix_mode )
     {
         if ( operator_stored_matrix_mode == linalg::OperatorStoredMatrixMode::Selective )
         {
-            // assert all necessary info is present
-            KOKKOS_ASSERT( level_range.has_value() && GCAElements.has_value() );
-            level_range_ = level_range.value();
-            GCAElements_ = GCAElements.value();
+            level_range_ = level_range;
+            GCAElements_ = GCAElements;
 
             // compute required capacity of map/selective storage
             int nGCAElements = kernels::common::dot_product( GCAElements_, GCAElements_ );
             capacity_        = 2 * nGCAElements * Kokkos::pow( 2, ( 3 * level_range_ ) );
             std::cout << "Number of GCA coarse elements: " << nGCAElements << "/"
-                      << GCAElements_.extent( 0 ) * (GCAElements_.extent( 1 ) - 1) * (GCAElements_.extent( 2 ) - 1) *
-                             (GCAElements_.extent( 2 ) - 1)
+                      << GCAElements_.extent( 0 ) * ( GCAElements_.extent( 1 ) - 1 ) *
+                             ( GCAElements_.extent( 2 ) - 1 ) * ( GCAElements_.extent( 2 ) - 1 )
                       << ", capacity: " << capacity_ << std::endl;
             local_matrices_selective_ =
                 Kokkos::View< dense::Mat< ScalarType, LocalMatrixDim, LocalMatrixDim >*, terra::grid::Layout >(
@@ -137,7 +135,6 @@ class LocalMatrixStorage
         }
         else if ( operator_stored_matrix_mode_ == linalg::OperatorStoredMatrixMode::Selective )
         {
-            
             // access map
             if ( indices_( local_subdomain_id, x_cell, y_cell, r_cell, wedge ) == -1 )
             {

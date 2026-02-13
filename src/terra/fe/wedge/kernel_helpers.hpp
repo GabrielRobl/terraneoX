@@ -1,6 +1,5 @@
 #pragma once
 
-
 namespace terra::fe::wedge {
 
 constexpr int num_wedges_per_hex_cell     = 2;
@@ -608,5 +607,47 @@ constexpr int fine_lateral_wedge_idx( const int x_cell_fine, const int y_cell_fi
     return indices[wedge_idx_fine][y_mod][x_mod];
 }
 
+enum class DoFOrdering
+{
+    NODEWISE,
+    DIMENSIONWISE,
+};
+
+
+template < typename ScalarT > KOKKOS_INLINE_FUNCTION
+constexpr void
+    reorder_local_dofs( const DoFOrdering doo_from, const DoFOrdering doo_to, dense::Vec< ScalarT, 18 >& dofs )
+{
+    if ( doo_from == doo_to )
+    {
+        return;
+    }
+
+    dense::Vec< ScalarT, 18 > tmp_dofs;
+    if ( (doo_from == DoFOrdering::NODEWISE) && (doo_to == DoFOrdering::DIMENSIONWISE) )
+    {
+        for ( int dim = 0; dim < 3; ++dim )
+        {
+            for ( int node_idx = 0; node_idx < num_nodes_per_wedge; node_idx++ )
+            {
+                tmp_dofs(node_idx + dim * num_nodes_per_wedge) = dofs(node_idx * 3 + dim);
+            }
+        }
+    }
+    else if ( (doo_from == DoFOrdering::DIMENSIONWISE) && (doo_to == DoFOrdering::NODEWISE) )
+    {
+        for ( int dim = 0; dim < 3; ++dim )
+        {
+            for ( int node_idx = 0; node_idx < num_nodes_per_wedge; node_idx++ )
+            {
+                tmp_dofs(node_idx * 3 + dim) = dofs(node_idx + dim * num_nodes_per_wedge);
+            }
+        }
+    }
+
+    for (int i = 0; i < 18; ++i) {
+        dofs(i) = tmp_dofs(i);
+    }
+}
 
 } // namespace terra::fe::wedge

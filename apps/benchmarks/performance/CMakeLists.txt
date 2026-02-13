@@ -13,4 +13,5 @@ add_terra_performance_benchmark(benchmark_alt)
 add_terra_performance_benchmark(benchmark_alt_fe)
 add_terra_performance_benchmark(benchmark_baseline)
 add_terra_performance_benchmark(benchmark_operators)
+add_terra_performance_benchmark(benchmark_communication)
 

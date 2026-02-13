@@ -3,6 +3,7 @@
 
 #include "communication/shell/communication.hpp"
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
+#include "fe/strong_algebraic_freeslip_enforcement.hpp"
 #include "fe/wedge/integrands.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_stokes.hpp"
 #include "fe/wedge/operators/shell/kmass.hpp"
@@ -20,6 +21,7 @@
 #include "kokkos/kokkos_wrapper.hpp"
 #include "linalg/diagonally_scaled_operator.hpp"
 #include "linalg/solvers/block_preconditioner_2x2.hpp"
+#include "linalg/solvers/chebyshev.hpp"
 #include "linalg/solvers/diagonal_solver.hpp"
 #include "linalg/solvers/fgmres.hpp"
 #include "linalg/solvers/gca/gca.hpp"
@@ -57,6 +59,13 @@ using util::logroot;
 using util::Ok;
 using util::Result;
 
+using grid::shell::BoundaryConditions;
+using grid::shell::BoundaryConditionFlag::DIRICHLET;
+using grid::shell::BoundaryConditionFlag::FREESLIP;
+using grid::shell::BoundaryConditionFlag::NEUMANN;
+using grid::shell::ShellBoundaryFlag::BOUNDARY;
+using grid::shell::ShellBoundaryFlag::CMB;
+using grid::shell::ShellBoundaryFlag::SURFACE;
 struct InitialConditionInterpolator
 {
     ScalarType                                         r_min_;
@@ -233,8 +242,10 @@ Result<> run( const Parameters& prm )
 
     // Set up Stokes vectors for the finest grid.
 
+    const std::string label_stokes = "u";
+
     std::map< std::string, VectorQ1IsoQ2Q1< ScalarType > > stok_vecs;
-    std::vector< std::string >                             stok_vec_names = { "u", "f", "tmp" };
+    std::vector< std::string >                             stok_vec_names = { label_stokes, "f", "tmp" };
 
     for ( const auto& name : stok_vec_names )
     {
@@ -336,12 +347,14 @@ Result<> run( const Parameters& prm )
     // Set up tmp vecs for multigrid preconditioner.
 
     std::vector< VectorQ1Vec< ScalarType > > tmp_mg;
+    std::vector< VectorQ1Vec< ScalarType > > tmp_mg_2;
     std::vector< VectorQ1Vec< ScalarType > > tmp_mg_r;
     std::vector< VectorQ1Vec< ScalarType > > tmp_mg_e;
 
     for ( int level = 0; level < num_levels; level++ )
     {
         tmp_mg.emplace_back( "tmp_mg_" + std::to_string( level ), domains[level], ownership_mask_data[level] );
+        tmp_mg_2.emplace_back( "tmp_mg_2_" + std::to_string( level ), domains[level], ownership_mask_data[level] );
         if ( level < num_levels - 1 )
         {
             tmp_mg_r.emplace_back( "tmp_mg_r_" + std::to_string( level ), domains[level], ownership_mask_data[level] );
@@ -351,8 +364,10 @@ Result<> run( const Parameters& prm )
 
     // Set up temperature and viscosity vectors.
 
+    const std::string label_temperature = "T";
+
     std::map< std::string, VectorQ1Scalar< ScalarType > > temp_vecs;
-    std::vector< std::string >                            temp_vec_names = { "T", "q" };
+    std::vector< std::string >                            temp_vec_names = { label_temperature, "q" };
     constexpr int                                         num_temp_tmps  = 8;
 
     for ( int i = 0; i < num_temp_tmps; i++ )
@@ -370,13 +385,18 @@ Result<> run( const Parameters& prm )
     auto& q = temp_vecs["q"];
 
     // Counting DoFs.
+    int world_size = 0;
+    MPI_Comm_size( MPI_COMM_WORLD, &world_size ); // total number of MPI processes
 
     const auto num_dofs_temperature =
         kernels::common::count_masked< long >( ownership_mask_data[num_levels - 1], grid::NodeOwnershipFlag::OWNED );
     const auto num_dofs_velocity = 3 * num_dofs_temperature;
     const auto num_dofs_pressure =
         kernels::common::count_masked< long >( ownership_mask_data[num_levels - 2], grid::NodeOwnershipFlag::OWNED );
-
+    logroot << "Degrees of freedom in (T,u,p) = (" << num_dofs_temperature << ", " << num_dofs_velocity << ", "
+            << num_dofs_pressure << ")" << std::endl;
+    logroot << "DoFs/process in (T,u,p) = (" << num_dofs_temperature / world_size << ", "
+            << num_dofs_velocity / world_size << ", " << num_dofs_pressure / world_size << ")" << std::endl;
     // Set up operators.
 
     using Stokes      = fe::wedge::operators::shell::EpsDivDivStokes< ScalarType >;
@@ -388,6 +408,26 @@ Result<> run( const Parameters& prm )
     using Prolongation = fe::wedge::operators::shell::ProlongationVecConstant< ScalarType >;
     using Restriction  = fe::wedge::operators::shell::RestrictionVecConstant< ScalarType >;
 
+    BoundaryConditions bcs = {
+        { CMB, DIRICHLET },
+        { SURFACE, DIRICHLET },
+    };
+
+    if ( prm.boundary_conditions_parameters.velocity_bc_cmb == BoundaryConditionsParameters::VelocityBC::FREE_SLIP )
+    {
+        grid::shell::set_boundary_condition_flag( bcs, CMB, FREESLIP );
+    }
+
+    if ( prm.boundary_conditions_parameters.velocity_bc_surface == BoundaryConditionsParameters::VelocityBC::FREE_SLIP )
+    {
+        grid::shell::set_boundary_condition_flag( bcs, SURFACE, FREESLIP );
+    }
+
+    BoundaryConditions bcs_neumann = {
+        { CMB, NEUMANN },
+        { SURFACE, NEUMANN },
+    };
+
     Stokes K(
         domains[velocity_level],
         domains[pressure_level],
@@ -395,7 +435,7 @@ Result<> run( const Parameters& prm )
         coords_radii[velocity_level],
         boundary_mask_data[velocity_level],
         eta[velocity_level].grid_data(),
-        true,
+        bcs,
         false );
 
     Stokes K_neumann(
@@ -405,7 +445,7 @@ Result<> run( const Parameters& prm )
         coords_radii[velocity_level],
         boundary_mask_data[velocity_level],
         eta[velocity_level].grid_data(),
-        false,
+        bcs_neumann,
         false );
 
     ViscousMass M( domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], false );
@@ -426,7 +466,7 @@ Result<> run( const Parameters& prm )
             coords_radii[level],
             boundary_mask_data[level],
             eta[level].grid_data(),
-            true,
+            bcs,
             false );
         if ( gca == 2 )
         {
@@ -435,7 +475,7 @@ Result<> run( const Parameters& prm )
         }
         else if ( gca == 1 )
         {
-            A_c.back().set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Full, std::nullopt, std::nullopt );
+            A_c.back().set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Full, level, GCAElements.grid_data() );
         }
         P.emplace_back( linalg::OperatorApplyMode::Add );
         R.emplace_back( domains[level] );
@@ -446,7 +486,7 @@ Result<> run( const Parameters& prm )
     {
         for ( int level = num_levels - 2; level >= 0; level-- )
         {
-            logroot << "Assembling GCA on level " << level << std::endl;
+            logroot << "Assembling GCA on level " << prm.mesh_parameters.refinement_level_mesh_min + level << std::endl;
 
             TwoGridGCA< ScalarType, Viscous >(
                 ( level == num_levels - 2 ) ? K_neumann.block_11() : A_c[level + 1],
@@ -486,41 +526,25 @@ Result<> run( const Parameters& prm )
 
     // Multigrid preconditioner.
 
-    using Smoother = linalg::solvers::Jacobi< Viscous >;
+    logroot << "Setting up multigrid smoother ..." << std::endl;
+
+    using Smoother = linalg::solvers::Chebyshev< Viscous >;
 
     std::vector< Smoother > smoothers;
     smoothers.reserve( num_levels );
 
-    // Estimate relaxation rates on every level.
-    logroot << "Estimating ralaxation rates for Jacobi smoother for the viscous block on each level." << std::endl;
     for ( int level = 0; level < num_levels; level++ )
     {
-        VectorQ1Vec< ScalarType > tmp_pi_0(
-            "tmp_pi_0" + std::to_string( level ), domains[level], ownership_mask_data[level] );
-        VectorQ1Vec< ScalarType > tmp_pi_1(
-            "tmp_pi_1" + std::to_string( level ), domains[level], ownership_mask_data[level] );
-        double max_ev = 0.0;
-        if ( level == num_levels - 1 )
-        {
-            linalg::DiagonallyScaledOperator inv_diag_A( K.block_11(), inverse_diagonals[level] );
-            max_ev = linalg::solvers::power_iteration(
-                inv_diag_A, tmp_pi_0, tmp_pi_1, prm.stokes_solver_parameters.viscous_pc_num_power_iterations );
-        }
-        else
-        {
-            linalg::DiagonallyScaledOperator inv_diag_A( A_c[level], inverse_diagonals[level] );
-            max_ev = linalg::solvers::power_iteration(
-                inv_diag_A, tmp_pi_0, tmp_pi_1, prm.stokes_solver_parameters.viscous_pc_num_power_iterations );
-        }
-        const auto omega_opt = 2.0 / ( 1.1 * max_ev );
-
-        logroot << " + level " << level << ": " << omega_opt << std::endl;
+        std::vector< VectorQ1Vec< ScalarType > > smoother_tmps;
+        smoother_tmps.push_back( tmp_mg[level] );
+        smoother_tmps.push_back( tmp_mg_2[level] );
 
         smoothers.emplace_back(
+            prm.stokes_solver_parameters.viscous_pc_chebyshev_order,
             inverse_diagonals[level],
+            smoother_tmps,
             prm.stokes_solver_parameters.viscous_pc_num_smoothing_steps_prepost,
-            tmp_mg[level],
-            omega_opt );
+            prm.stokes_solver_parameters.viscous_pc_num_power_iterations );
     }
 
     logroot << "Setting up multigrid coarse grid solver ..." << std::endl;
@@ -709,8 +733,8 @@ Result<> run( const Parameters& prm )
         { "dofs_velocity", num_dofs_velocity },
         { "dofs_temperature", num_dofs_temperature },
         { "dofs_pressure", num_dofs_pressure },
-        { "level_velocity", velocity_level },
-        { "level_pressure", pressure_level },
+        { "level_velocity", prm.mesh_parameters.refinement_level_mesh_max },
+        { "level_pressure", prm.mesh_parameters.refinement_level_mesh_max - 1 },
     } );
 
     table->print_pretty();
@@ -725,6 +749,51 @@ Result<> run( const Parameters& prm )
     xdmf_output.add( T.grid_data() );
     xdmf_output.add( u.block_1().grid_data() );
     xdmf_output.add( eta[velocity_level].grid_data() );
+
+    int timestep_start = 0;
+
+    const bool loading_checkpoint = !prm.io_parameters.checkpoint_dir.empty() && prm.io_parameters.checkpoint_step >= 0;
+
+    if ( loading_checkpoint )
+    {
+        logroot << "Loading checkpoint from " << prm.io_parameters.checkpoint_dir << " at step "
+                << prm.io_parameters.checkpoint_step << std::endl;
+
+        auto success_vel = io::read_xdmf_checkpoint_grid(
+            prm.io_parameters.checkpoint_dir,
+            label_stokes + "_u",
+            prm.io_parameters.checkpoint_step,
+            domains[velocity_level],
+            u.block_1().grid_data() );
+
+        if ( success_vel.is_err() )
+        {
+            Kokkos::abort( success_vel.error().c_str() );
+        }
+
+        auto success_temp = io::read_xdmf_checkpoint_grid(
+            prm.io_parameters.checkpoint_dir,
+            label_temperature,
+            prm.io_parameters.checkpoint_step,
+            domains[velocity_level],
+            T.grid_data() );
+
+        if ( success_temp.is_err() )
+        {
+            Kokkos::abort( success_temp.error().c_str() );
+        }
+
+        if ( loading_checkpoint )
+        {
+            // Starting the time stepping from the next step after the loaded step.
+            timestep_start = prm.io_parameters.checkpoint_step + 1;
+
+            // Setting XDMF to the same step as we have loaded.
+            // Thus, we will now re-write the loaded data.
+            // Maybe a good sanity check.
+            xdmf_output.set_write_counter( prm.io_parameters.checkpoint_step );
+        }
+    }
 
     logroot << "Writing initial XDMF ..." << std::endl;
 
@@ -746,7 +815,7 @@ Result<> run( const Parameters& prm )
 
     logroot << "Starting time stepping!" << std::endl;
 
-    for ( int timestep = 1; timestep < prm.time_stepping_parameters.max_timesteps; timestep++ )
+    for ( int timestep = timestep_start; timestep < prm.time_stepping_parameters.max_timesteps; timestep++ )
     {
         logroot << "\n### Timestep " << timestep << " ###" << std::endl;
 
@@ -770,7 +839,8 @@ Result<> run( const Parameters& prm )
 
         fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
             stok_vecs["f"], boundary_mask_data[velocity_level], grid::shell::ShellBoundaryFlag::BOUNDARY );
-
+     
+        
         logroot << "Solving Stokes ..." << std::endl;
 
         // Solve Stokes.
@@ -906,6 +976,18 @@ Result<> run( const Parameters& prm )
 
         if ( simulated_time >= prm.time_stepping_parameters.t_end )
         {
+            break;
+        }
+
+        if ( has_nan_or_inf( T ) )
+        {
+            logroot << "\nDETECTED NAN OR INF.\n\n"
+                       "For some reason the temperature vector contains NaN or inf values.\n"
+                       "Those might come from anywhere (not necessarily the energy solve).\n"
+                       "To avoid burning compute time, the simulation will exit now.\n\n"
+                       "You may be able to recover the simulation from an earlier checkpoint.\n\n"
+                       "Good luck and bye."
+                    << std::endl;
             break;
         }
     }

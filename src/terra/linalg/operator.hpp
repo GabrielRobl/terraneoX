@@ -5,37 +5,53 @@
 namespace terra::linalg {
 
 /// @brief Modes for applying an operator to a vector.
-/// Replace: Overwrite the destination vector.
-/// Add: Add to the destination vector.
+///
+/// @note It is important to pair the modes correctly.
+///       **If unsure, use temporary vectors, apply each operator individually (typically defaulting to modes 'Replace'
+///       and 'CommunicateAdditively'), and add the results in the end.**
+///
+/// Elementwise operators have to communicate after all local values have been updated.
+/// The general approach is to communicate and sum up values of overlapping nodes.
+/// If the 'ApplyMode' is set to 'Add' and additive communication follows that, then also previous values will
+/// be included in the sum.
+///
+/// The modes are, for instance, useful for block matrices like the Stokes operator.
+/// If you want to execute, e.g., \f$ y \gets Au + B^T p \f$ then you could execute this as follows:
+/// \f[
+///     \begin{aligned}
+///     y &\gets Au && \qquad \text{replace and skip communication} \\
+///     y &\gets y + B^Tp && \qquad \text{add and communicate additively} \\
+///     \end{aligned}
+/// \f]
+/// Note that if communication is not skipped in the first step in this example, the subdomain boundary data will be
+/// wrong.
+///
 enum class OperatorApplyMode
 {
-    Replace,
-    Add,
+    Replace, ///< Overwrite the destination vector.
+    Add,     ///< Add to the destination vector.
 };
 
 /// @brief Modes for communication during operator application.
-/// SkipCommunication: Do not communicate.
-/// CommunicateAdditively: Communicate and add results.
+///
+/// @note See @ref OperatorApplyMode for more details.
+///
 enum class OperatorCommunicationMode
 {
-    SkipCommunication,
-    CommunicateAdditively,
+    SkipCommunication,     ///< Do not communicate.
+    CommunicateAdditively, ///< Communicate and add results.
 };
 
-
 /// @brief Modes for applying stored matrices.
-/// Off: Do not use stored matrices.
-/// Full: Use stored matrices on all elements.
-/// Selective: Use stored matrices on selected, marked elements only,
-///            assemble on all others.
 enum class OperatorStoredMatrixMode
 {
-    Off,
-    Full,
-    Selective,
+    Off,       ///< Do not use stored matrices.
+    Full,      ///< Use stored matrices on all elements.
+    Selective, ///< Use stored matrices on selected, marked elements only, assemble on all others.
 };
 
 /// @brief Concept for types that behave like linear operators.
+///
 /// Requires vector types, matvec implementation, and compatibility with VectorLike.
 template < typename T >
 concept OperatorLike = requires(
@@ -126,11 +142,11 @@ concept Block2x2OperatorLike = OperatorLike< T > && requires( const T& self_cons
 
 /// @brief Alias for the source vector type of an operator.
 template < OperatorLike Operator >
-using SrcOf = typename Operator::SrcVectorType;
+using SrcOf = Operator::SrcVectorType;
 
 /// @brief Alias for the destination vector type of an operator.
 template < OperatorLike Operator >
-using DstOf = typename Operator::DstVectorType;
+using DstOf = Operator::DstVectorType;
 
 /// @brief Apply an operator to a source vector and write to a destination vector.
 /// @param A Operator to apply.
@@ -138,7 +154,9 @@ using DstOf = typename Operator::DstVectorType;
 /// @param dst Destination vector.
 template < OperatorLike Operator >
 void apply( Operator& A, const SrcOf< Operator >& src, DstOf< Operator >& dst )
-{ A.apply_impl( src, dst ); }
+{
+    A.apply_impl( src, dst );
+}
 
 namespace detail {
 

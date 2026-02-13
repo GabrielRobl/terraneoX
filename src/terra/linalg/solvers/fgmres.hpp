@@ -80,6 +80,7 @@ class FGMRES
     , options_( options )
     , statistics_( statistics )
     , preconditioner_( preconditioner )
+    , skip_preconditioner_in_case_of_nan_or_infs_( true )
     {}
 
     /// @brief Set a tag string for statistics output identification.
@@ -132,8 +133,9 @@ class FGMRES
         const int needed = 2 * m_req + 4;
         if ( nTmp < needed )
         {
-            std::cerr << "FGMRES: insufficient tmp vectors. Provided " << nTmp << ", required at least " << needed
-                      << " for restart m = " << m_req << std::endl;
+            std::cerr << "FGMRES: insufficient tmp vectors. Provided " << nTmp
+                      << ", required at least (2*restart + 4) = " << needed << " for restart m = " << m_req
+                      << std::endl;
             Kokkos::abort( "FGMRES: insufficient tmp vectors" );
         }
 
@@ -174,6 +176,21 @@ class FGMRES
                 auto& zj = tmp_[offZ + j];
                 assign( zj, 0 );
                 solve( preconditioner_, A, zj, vj );
+
+                const bool preconditioner_result_contains_nan_or_inf = has_nan_or_inf( zj );
+
+                if ( skip_preconditioner_in_case_of_nan_or_infs_ && preconditioner_result_contains_nan_or_inf )
+                {
+                    util::logroot
+                        << "FGMRES: The preconditioner appears to have produced a vector that has NaN or Inf entries.\n"
+                           "        This may be a result of the preconditioner or of the input provided by FGMRES.\n"
+                           "        To at least provide a fix for the first case, we keep the input to the preconditioner\n"
+                           "        and write it to the output (equivalent of skipping the preconditioner in this iteration).\n"
+                           "        (Details: total_iters = "
+                        << total_iters << ", j = " << j << ")" << std::endl;
+
+                    assign( zj, vj );
+                }
 
                 // Apply operator: w = A * z_j
                 auto& w = tmp_[idxW];
@@ -290,6 +307,8 @@ class FGMRES
     std::shared_ptr< util::Table > statistics_; ///< Statistics table for iteration logging (optional).
 
     PreconditionerT preconditioner_; ///< Preconditioner solver.
+
+    bool skip_preconditioner_in_case_of_nan_or_infs_;
 };
 
 /// @brief Static assertion: FGMRES satisfies SolverLike concept.

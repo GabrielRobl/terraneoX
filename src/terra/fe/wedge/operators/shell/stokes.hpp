@@ -36,15 +36,16 @@ class Stokes
 
   public:
     Stokes(
-        const grid::shell::DistributedDomain&       domain_fine,
-        const grid::shell::DistributedDomain&       domain_coarse,
-        const grid::Grid3DDataVec< ScalarType, 3 >& grid,
-        const grid::Grid2DDataScalar< ScalarType >& radii,
-        bool                                        treat_boundary,
-        bool                                        diagonal )
-    : A_( domain_fine, grid, radii, treat_boundary, diagonal )
-    , B_T_( domain_fine, domain_coarse, grid, radii, treat_boundary )
-    , B_( domain_fine, domain_coarse, grid, radii, treat_boundary )
+        const grid::shell::DistributedDomain&                           domain_fine,
+        const grid::shell::DistributedDomain&                           domain_coarse,
+        const grid::Grid3DDataVec< ScalarType, 3 >&                     grid,
+        const grid::Grid2DDataScalar< ScalarType >&                     radii,
+        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask_data_fine,
+        BoundaryConditions                                              bcs,
+        bool                                                            diagonal )
+     : A_( domain_fine, grid, radii, boundary_mask_data_fine, bcs, diagonal )
+    , B_T_( domain_fine, domain_coarse, grid, radii, boundary_mask_data_fine, bcs )
+    , B_( domain_fine, domain_coarse, grid, radii, boundary_mask_data_fine, bcs )
     , diagonal_( diagonal )
     {}
 

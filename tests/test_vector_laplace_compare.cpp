@@ -31,6 +31,13 @@ using grid::shell::DomainInfo;
 using grid::shell::SubdomainInfo;
 using linalg::VectorQ1Scalar;
 using linalg::VectorQ1Vec;
+using grid::shell::BoundaryConditions;
+using grid::shell::BoundaryConditionFlag::DIRICHLET;
+using grid::shell::BoundaryConditionFlag::FREESLIP;
+using grid::shell::BoundaryConditionFlag::NEUMANN;
+using grid::shell::ShellBoundaryFlag::BOUNDARY;
+using grid::shell::ShellBoundaryFlag::CMB;
+using grid::shell::ShellBoundaryFlag::SURFACE;
 
 struct SolutionInterpolator
 {
@@ -77,7 +84,8 @@ void test( int level, bool treat_boundary, bool diagonal )
 
     const auto domain = DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, 0.5, 1.0 );
 
-    auto mask_data = grid::setup_node_ownership_mask_data( domain );
+    auto mask_data          = grid::setup_node_ownership_mask_data( domain );
+    auto boundary_mask_data = grid::shell::setup_boundary_mask_data( domain );
 
     VectorQ1Vec< ScalarType > src( "src", domain, mask_data );
     VectorQ1Vec< ScalarType > dst_a( "dst_a", domain, mask_data );
@@ -92,12 +100,15 @@ void test( int level, bool treat_boundary, bool diagonal )
 
     const auto coords_shell = terra::grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domain );
     const auto coords_radii = terra::grid::shell::subdomain_shell_radii< ScalarType >( domain );
-
+    BoundaryConditions bcs  = {
+        { CMB, DIRICHLET },
+        { SURFACE, DIRICHLET },
+    };
     using LaplaceA = fe::wedge::operators::shell::VectorLaplaceSimple< ScalarType >;
     using LaplaceB = fe::wedge::operators::shell::VectorLaplace< ScalarType >;
 
     LaplaceA A( domain, coords_shell, coords_radii, treat_boundary, diagonal );
-    LaplaceB B( domain, coords_shell, coords_radii, treat_boundary, diagonal );
+    LaplaceB B( domain, coords_shell, coords_radii, boundary_mask_data, bcs, diagonal );
 
     // Set up solution data.
     Kokkos::parallel_for(

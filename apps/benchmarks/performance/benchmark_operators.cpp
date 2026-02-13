@@ -3,6 +3,7 @@
 
 #include "fe/wedge/operators/shell/epsilon_divdiv.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_kerngen.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_stokes.hpp"
 #include "fe/wedge/operators/shell/laplace.hpp"
 #include "fe/wedge/operators/shell/laplace_simple.hpp"
 #include "fe/wedge/operators/shell/stokes.hpp"
@@ -20,12 +21,19 @@
 
 using namespace terra;
 
+using fe::wedge::operators::shell::EpsDivDivStokes;
 using fe::wedge::operators::shell::EpsilonDivDiv;
 using fe::wedge::operators::shell::EpsilonDivDivKerngen;
 using fe::wedge::operators::shell::Laplace;
 using fe::wedge::operators::shell::LaplaceSimple;
 using fe::wedge::operators::shell::Stokes;
 using fe::wedge::operators::shell::VectorLaplaceSimple;
+using grid::shell::BoundaryConditionFlag::DIRICHLET;
+using grid::shell::BoundaryConditionFlag::FREESLIP;
+using grid::shell::BoundaryConditionFlag::NEUMANN;
+using grid::shell::ShellBoundaryFlag::BOUNDARY;
+using grid::shell::ShellBoundaryFlag::CMB;
+using grid::shell::ShellBoundaryFlag::SURFACE;
 using linalg::apply;
 using linalg::DstOf;
 using linalg::OperatorLike;
@@ -33,6 +41,7 @@ using linalg::SrcOf;
 using linalg::VectorQ1IsoQ2Q1;
 using linalg::VectorQ1Scalar;
 using linalg::VectorQ1Vec;
+using terra::grid::shell::BoundaryConditions;
 using util::logroot;
 
 enum class BenchmarkType : int
@@ -47,6 +56,7 @@ enum class BenchmarkType : int
     EpsDivDivDouble,
     EpsDivDivKerngenDouble,
     StokesDouble,
+    EpsDivDivStokesDouble
 };
 
 constexpr auto all_benchmark_types = {
@@ -63,7 +73,8 @@ const std::map< BenchmarkType, std::string > benchmark_description = {
     { BenchmarkType::EpsDivDivFloat, "EpsDivDiv (float)" },
     { BenchmarkType::EpsDivDivDouble, "EpsDivDiv (double)" },
     { BenchmarkType::EpsDivDivKerngenDouble, "EpsDivDivKerngen (double)" },
-    { BenchmarkType::StokesDouble, "Stokes (double)" } };
+    { BenchmarkType::StokesDouble, "Stokes (double)" },
+    { BenchmarkType::EpsDivDivStokesDouble, "EpsDivDivStokes (double)" } };
 
 struct BenchmarkData
 {
@@ -77,6 +88,7 @@ struct Parameters
     int min_level  = 1;
     int max_level  = 6;
     int executions = 5;
+    int refinement_level_subdomains = 0;
 };
 
 template < OperatorLike OperatorT >
@@ -102,18 +114,25 @@ double measure_run_time( int executions, OperatorT& A, const SrcOf< OperatorT >&
     return duration;
 }
 
-BenchmarkData run( const BenchmarkType benchmark, const int level, const int executions )
+BenchmarkData
+    run( const BenchmarkType benchmark, const int level, const int executions, const int refinement_level_subdomains )
 {
     if ( level < 1 )
     {
         Kokkos::abort( "level must be >= 1" );
     }
 
-    const auto domain =
-        grid::shell::DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, 0.5, 1.0 );
+    const auto domain = grid::shell::DistributedDomain::create_uniform(
+        level, level, 0.5, 1.0, refinement_level_subdomains, refinement_level_subdomains );
+    const auto subdomain_distr = grid::shell::subdomain_distribution( domain );
+    logroot << "Subdomain distribution: \n";
+    logroot << " - total: " << subdomain_distr.total << "\n";
+    logroot << " - min:   " << subdomain_distr.min << "\n";
+    logroot << " - avg:   " << subdomain_distr.avg << "\n";
+    logroot << " - max:   " << subdomain_distr.max << "\n\n";
 
-    const auto domain_coarse =
-        grid::shell::DistributedDomain::create_uniform_single_subdomain_per_diamond( level - 1, level - 1, 0.5, 1.0 );
+    const auto domain_coarse = grid::shell::DistributedDomain::create_uniform(
+        level - 1, level - 1, 0.5, 1.0, refinement_level_subdomains, refinement_level_subdomains );
 
     const auto coords_shell_double = grid::shell::subdomain_unit_sphere_single_shell_coords< double >( domain );
     const auto coords_radii_double = grid::shell::subdomain_shell_radii< double >( domain );
@@ -174,7 +193,10 @@ BenchmarkData run( const BenchmarkType benchmark, const int level, const int exe
     linalg::randomize( src_vec_float );
     linalg::randomize( src_stokes_double );
     linalg::randomize( src_stokes_float );
-
+    BoundaryConditions bcs = {
+        { CMB, DIRICHLET },
+        { SURFACE, DIRICHLET },
+    };
     double duration = 0.0;
     long   dofs     = 0;
     if ( benchmark == BenchmarkType::LaplaceFloat )
@@ -246,7 +268,7 @@ BenchmarkData run( const BenchmarkType benchmark, const int level, const int exe
             coords_radii_double,
             boundary_mask_data,
             coeff_double.grid_data(),
-            true,
+            bcs,
             false );
         util::Timer t( "EpsDivDiv - double" );
         duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
@@ -254,7 +276,22 @@ BenchmarkData run( const BenchmarkType benchmark, const int level, const int exe
     }
     else if ( benchmark == BenchmarkType::StokesDouble )
     {
-        Stokes< double > A( domain, domain_coarse, coords_shell_double, coords_radii_double, true, false );
+        Stokes< double > A(
+            domain, domain_coarse, coords_shell_double, coords_radii_double, boundary_mask_data, bcs, false );
+        duration = measure_run_time( executions, A, src_stokes_double, dst_stokes_double );
+        dofs     = dofs_stokes;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivStokesDouble )
+    {
+        EpsDivDivStokes< double > A(
+            domain,
+            domain_coarse,
+            coords_shell_double,
+            coords_radii_double,
+            boundary_mask_data,
+            coeff_double.grid_data(),
+            bcs,
+            false );
         duration = measure_run_time( executions, A, src_stokes_double, dst_stokes_double );
         dofs     = dofs_stokes;
     }
@@ -266,13 +303,17 @@ BenchmarkData run( const BenchmarkType benchmark, const int level, const int exe
     return BenchmarkData{ level, dofs, duration };
 }
 
-void run_all( const int min_level, const int max_level, const int executions )
+void run_all( const int min_level, const int max_level, const int executions, const int refinement_level_subdomains )
 {
     logroot << "Running operator (matvec) benchmarks." << std::endl;
     logroot << "min_level:            " << min_level << std::endl;
     logroot << "max_level:            " << max_level << std::endl;
     logroot << "executions per level: " << executions << std::endl;
+    logroot << "refinement for subdomains " << refinement_level_subdomains << std::endl;
     logroot << std::endl;
+    int world_size = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size); // total number of MPI processes
+   
 
     for ( auto benchmark : all_benchmark_types )
     {
@@ -282,7 +323,7 @@ void run_all( const int min_level, const int max_level, const int executions )
 
         for ( int i = min_level; i <= max_level; ++i )
         {
-            const auto data = run( benchmark, i, executions );
+            const auto data = run( benchmark, i, executions, refinement_level_subdomains );
             table.add_row(
                 { { "level", i },
                   { "dofs", data.dofs },
@@ -291,6 +332,10 @@ void run_all( const int min_level, const int max_level, const int executions )
         }
 
         table.print_pretty();
+
+        // output a csv table of results
+        std::ofstream out("./csv/bo_ml" + std::to_string(max_level) + "_sdr" +  std::to_string(refinement_level_subdomains) + "_np" + std::to_string(world_size) + ".csv" );
+        table.print_csv(out);
 
         logroot << std::endl;
         logroot << std::endl;
@@ -321,6 +366,7 @@ int main( int argc, char** argv )
 
     util::add_option_with_default( app, "--min-level", parameters.min_level, "Min refinement level." );
     util::add_option_with_default( app, "--max-level", parameters.max_level, "Max refinement level." );
+    util::add_option_with_default( app, "--refinement-level-subdomains", parameters.refinement_level_subdomains, "Refinement level applied to form the subdomains." );
     util::add_option_with_default(
         app, "--executions", parameters.executions, "Number of matrix-vector multiplications to be executed." );
 
@@ -337,7 +383,7 @@ int main( int argc, char** argv )
     util::print_cli_summary( app, logroot );
     logroot << "\n\n";
 
-    run_all( parameters.min_level, parameters.max_level, parameters.executions );
+    run_all( parameters.min_level, parameters.max_level, parameters.executions, parameters.refinement_level_subdomains );
 
     MPI_Finalize();
 }

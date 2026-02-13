@@ -65,6 +65,11 @@ namespace terra::io {
 /// (if the amount of main memory permits) read a checkpoint from a large parallel simulation with only one or a few
 /// processes (possibly useful for post-processing).
 ///
+/// ## Picking the last step during checkpoint recovery
+///
+/// The .xmf file for each write() call is written last (after the binary data).
+/// Thus, if the corresponding .xmf step has been written, the parallel binary data output should be completed.
+///
 /// # Checkpoint data binary format
 ///
 /// All data is written to a single binary file per grid data item and per time step.
@@ -104,6 +109,7 @@ namespace terra::io {
 /// subdomain_size_y:                             i32
 /// subdomain_size_r:                             i32
 /// radii:                                        array: f64, entries: num_subdomains_per_diamond_radial_direction * (subdomain_size_r - 1) + 1
+/// grid_scalar_bytes                             i32 // new in checkpoint version 1, number of float bytes for writing the grid (4 or 8 byte float)
 /// num_grid_data_files:                          i32
 /// list (size = num_grid_data_files)
 /// [
@@ -194,6 +200,12 @@ class XDMFOutput
         }
     }
 
+    /// @brief Set the write counter manually.
+    ///
+    /// This will only affect the step number attached to the file names. The geometry is still written once during the
+    /// first write() call.
+    void set_write_counter( int write_counter ) { write_counter_ = write_counter; }
+
     /// @brief Adds a new scalar data grid to be written out.
     ///
     /// Does not write any data to file yet - call write() for writing the next time step.
@@ -202,7 +214,7 @@ class XDMFOutput
         add( const grid::Grid4DDataScalar< InputScalarDataType >& data,
              const OutputTypeFloat                                output_type = OutputTypeFloat::Float32 )
     {
-        if ( write_counter_ != 0 )
+        if ( first_write_happened_ )
         {
             Kokkos::abort( "XDMF::add(): Cannot add data after write() has been called." );
         }
@@ -238,7 +250,7 @@ class XDMFOutput
         add( const grid::Grid4DDataVec< InputScalarDataType, VecDim >& data,
              const OutputTypeFloat                                     output_type = OutputTypeFloat::Float32 )
     {
-        if ( write_counter_ != 0 )
+        if ( first_write_happened_ )
         {
             Kokkos::abort( "XDMF::add(): Cannot add data after write() has been called." );
         }
@@ -300,7 +312,7 @@ class XDMFOutput
         const auto number_of_nodes_local    = num_subdomains * nodes_x * nodes_y * nodes_r;
         const auto number_of_elements_local = num_subdomains * ( nodes_x - 1 ) * ( nodes_y - 1 ) * ( nodes_r - 1 ) * 2;
 
-        if ( write_counter_ == 0 )
+        if ( !first_write_happened_ )
         {
             // Number of global nodes and elements.
 
@@ -497,6 +509,7 @@ class XDMFOutput
         }
 
         write_counter_++;
+        first_write_happened_ = true;
     }
 
   private:
@@ -648,7 +661,7 @@ class XDMFOutput
         {
             if ( !host_data_mirror_scalar_double_.has_value() )
             {
-                host_data_mirror_scalar_double_ = Kokkos::create_mirror_view( Kokkos::HostSpace{}, device_data );
+                host_data_mirror_scalar_double_ = Kokkos::create_mirror( Kokkos::HostSpace{}, device_data );
             }
 
             Kokkos::deep_copy( host_data_mirror_scalar_double_.value(), device_data );
@@ -674,7 +687,7 @@ class XDMFOutput
         {
             if ( !host_data_mirror_scalar_float_.has_value() )
             {
-                host_data_mirror_scalar_float_ = Kokkos::create_mirror_view( Kokkos::HostSpace{}, device_data );
+                host_data_mirror_scalar_float_ = Kokkos::create_mirror( Kokkos::HostSpace{}, device_data );
             }
 
             Kokkos::deep_copy( host_data_mirror_scalar_float_.value(), device_data );
@@ -765,7 +778,7 @@ class XDMFOutput
         {
             if ( !host_data_mirror_vec_double_.has_value() )
             {
-                host_data_mirror_vec_double_ = Kokkos::create_mirror_view( Kokkos::HostSpace{}, device_data );
+                host_data_mirror_vec_double_ = Kokkos::create_mirror( Kokkos::HostSpace{}, device_data );
             }
 
             Kokkos::deep_copy( host_data_mirror_vec_double_.value(), device_data );
@@ -795,7 +808,7 @@ class XDMFOutput
         {
             if ( !host_data_mirror_vec_float_.has_value() )
             {
-                host_data_mirror_vec_float_ = Kokkos::create_mirror_view( Kokkos::HostSpace{}, device_data );
+                host_data_mirror_vec_float_ = Kokkos::create_mirror( Kokkos::HostSpace{}, device_data );
             }
 
             Kokkos::deep_copy( host_data_mirror_vec_float_.value(), device_data );
@@ -899,7 +912,7 @@ class XDMFOutput
             checkpoint_metadata_stream.write( reinterpret_cast< const char* >( &value ), sizeof( double ) );
         };
 
-        write_i32( 0 ); // version
+        write_i32( 1 ); // version
         write_i32( distributed_domain_.domain_info().num_subdomains_per_diamond_side() );
         write_i32( distributed_domain_.domain_info().num_subdomains_in_radial_direction() );
 
@@ -911,6 +924,8 @@ class XDMFOutput
         {
             write_f64( static_cast< double >( r ) );
         }
+
+        write_i32( static_cast< int32_t >( output_type_points_ ) );
 
         write_i32(
             device_data_views_scalar_float_.size() + device_data_views_scalar_double_.size() +
@@ -1075,7 +1090,8 @@ class XDMFOutput
     std::optional< grid::Grid4DDataVec< double, 3 >::HostMirror > host_data_mirror_vec_double_;
     std::optional< grid::Grid4DDataVec< float, 3 >::HostMirror >  host_data_mirror_vec_float_;
 
-    int write_counter_ = 0;
+    int  write_counter_        = 0;
+    bool first_write_happened_ = false;
 
     int number_of_nodes_offset_      = -1;
     int number_of_elements_offset_   = -1;
@@ -1098,6 +1114,8 @@ struct CheckpointMetadata
     int32_t size_r{};
 
     std::vector< double > radii;
+
+    int32_t grid_scalar_bytes{};
 
     struct GridDataFile
     {
@@ -1199,6 +1217,13 @@ struct CheckpointMetadata
         metadata.radii.push_back( r );
     }
 
+    if ( metadata.version > 0 )
+    {
+        // new in version 1: number of bytes for grid points data
+        if ( read_i32( metadata.grid_scalar_bytes ) )
+            return read_error;
+    }
+
     int32_t num_grid_data_files;
     if ( read_i32( num_grid_data_files ) )
         return read_error;
@@ -1270,9 +1295,11 @@ template < typename GridDataType >
 
     const auto& checkpoint_metadata = checkpoint_metadata_result.unwrap();
 
-    if ( checkpoint_metadata.version != 0 )
+    if ( !( checkpoint_metadata.version == 0 || checkpoint_metadata.version == 1 ) )
     {
-        return { "Checkpoint version other than 0 is not supported." };
+        return {
+            "Supported checkpoint verions: 0, 1. This checkpoint has version " +
+            std::to_string( checkpoint_metadata.version ) + "." };
     }
 
     // Check whether we have checkpoint metadata for the requested data label.
@@ -1372,8 +1399,7 @@ template < typename GridDataType >
 
     // Now write from buffer to grid.
 
-    typename GridDataType::HostMirror grid_data_host =
-        Kokkos::create_mirror_view( Kokkos::HostSpace{}, grid_data_device );
+    typename GridDataType::HostMirror grid_data_host = Kokkos::create_mirror( Kokkos::HostSpace{}, grid_data_device );
 
     const auto checkpoint_is_float =
         requested_grid_data_file.value().scalar_data_type == 2 && requested_grid_data_file.value().scalar_bytes == 4;

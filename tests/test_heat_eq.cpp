@@ -107,13 +107,18 @@ void test( int level, int timesteps, double dt, const std::shared_ptr< util::Tab
 
     using AD = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPG< ScalarType >;
 
-    AD A_bdf1( domain, subdomain_shell_coords, subdomain_radii, u, 1.0, dt, true, false, 1.0 );
-    AD A_bdf1_neumann_diag( domain, subdomain_shell_coords, subdomain_radii, u, 1.0, dt, false, true, 1.0 );
-    AD A_bdf1_neumann( domain, subdomain_shell_coords, subdomain_radii, u, 1.0, dt, false, false, 1.0 );
+    AD A_bdf1( domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, u, 1.0, dt, true, false, 1.0 );
+    AD A_bdf1_neumann_diag(
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, u, 1.0, dt, false, true, 1.0 );
+    AD A_bdf1_neumann(
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, u, 1.0, dt, false, false, 1.0 );
 
-    AD A_bdf2( domain, subdomain_shell_coords, subdomain_radii, u, 1.0, dt, true, false, 3.0 / 2.0 );
-    AD A_bdf2_neumann_diag( domain, subdomain_shell_coords, subdomain_radii, u, 1.0, dt, false, true, 3.0 / 2.0 );
-    AD A_bdf2_neumann( domain, subdomain_shell_coords, subdomain_radii, u, 1.0, dt, false, false, 3.0 / 2.0 );
+    AD A_bdf2(
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, u, 1.0, dt, true, false, 3.0 / 2.0 );
+    AD A_bdf2_neumann_diag(
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, u, 1.0, dt, false, true, 3.0 / 2.0 );
+    AD A_bdf2_neumann(
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, u, 1.0, dt, false, false, 3.0 / 2.0 );
 
     using Mass = fe::wedge::operators::shell::Mass< ScalarType >;
 

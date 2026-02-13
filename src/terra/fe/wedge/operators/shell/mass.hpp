@@ -44,7 +44,7 @@ class Mass
         const grid::shell::DistributedDomain&    domain,
         const grid::Grid3DDataVec< ScalarT, 3 >& grid,
         const grid::Grid2DDataScalar< ScalarT >& radii,
-        const bool                               diagonal,
+        const bool                               diagonal            = false,
         const bool                               lumped_diagonal     = false,
         linalg::OperatorApplyMode                operator_apply_mode = linalg::OperatorApplyMode::Replace,
         linalg::OperatorCommunicationMode        operator_communication_mode =
@@ -53,6 +53,7 @@ class Mass
     , grid_( grid )
     , radii_( radii )
     , diagonal_( diagonal )
+    , lumped_diagonal_( lumped_diagonal )
     , operator_apply_mode_( operator_apply_mode )
     , operator_communication_mode_( operator_communication_mode )
     // TODO: we can reuse the send and recv buffers and pass in from the outside somehow
@@ -72,6 +73,11 @@ class Mass
         {
             assign( dst, 0 );
         }
+        else if ( operator_apply_mode_ == linalg::OperatorApplyMode::Add ) {}
+        else
+        {
+            Kokkos::abort( "Operator apply mode not implemented." );
+        }
 
         src_ = src.grid_data();
         dst_ = dst.grid_data();
@@ -88,6 +94,11 @@ class Mass
             communication::shell::pack_send_and_recv_local_subdomain_boundaries(
                 domain_, dst_, send_buffers_, recv_buffers_ );
             communication::shell::unpack_and_reduce_local_subdomain_boundaries( domain_, dst_, recv_buffers_ );
+        }
+        else if ( operator_communication_mode_ == linalg::OperatorCommunicationMode::SkipCommunication ) {}
+        else
+        {
+            Kokkos::abort( "Communication mode not implemented." );
         }
     }
 
@@ -152,8 +163,8 @@ class Mass
         {
             dense::Vec< ScalarT, 6 > ones;
             ones.fill( 1.0 );
-            A[0] = dense::Mat< ScalarT, 6, 6 >::diagonal_from_vec(A[0] * ones);
-            A[1] = dense::Mat< ScalarT, 6, 6 >::diagonal_from_vec(A[1] * ones);
+            A[0] = dense::Mat< ScalarT, 6, 6 >::diagonal_from_vec( A[0] * ones );
+            A[1] = dense::Mat< ScalarT, 6, 6 >::diagonal_from_vec( A[1] * ones );
         }
 
         dense::Vec< ScalarT, 6 > src[num_wedges_per_hex_cell];

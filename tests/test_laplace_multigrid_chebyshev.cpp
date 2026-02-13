@@ -5,16 +5,14 @@
 #include "../src/terra/communication/shell/communication.hpp"
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
 #include "fe/wedge/integrands.hpp"
-#include "linalg/solvers/gca/gca.hpp"
+#include "fe/wedge/operators/shell/laplace.hpp"
 #include "fe/wedge/operators/shell/laplace_simple.hpp"
 #include "fe/wedge/operators/shell/prolongation_constant.hpp"
-#include "fe/wedge/operators/shell/prolongation_linear.hpp"
 #include "fe/wedge/operators/shell/restriction_constant.hpp"
-#include "fe/wedge/operators/shell/restriction_linear.hpp"
+#include "linalg/solvers/chebyshev.hpp"
 #include "linalg/solvers/jacobi.hpp"
 #include "linalg/solvers/multigrid.hpp"
 #include "linalg/solvers/pcg.hpp"
-#include "linalg/solvers/richardson.hpp"
 #include "linalg/util/debug_sparse_assembly.hpp"
 #include "terra/dense/mat.hpp"
 #include "terra/eigen/eigen_wrapper.hpp"
@@ -25,8 +23,6 @@
 #include "terra/io/xdmf.hpp"
 #include "terra/kernels/common/grid_operations.hpp"
 #include "terra/kokkos/kokkos_wrapper.hpp"
-#include "terra/linalg/diagonally_scaled_operator.hpp"
-#include "terra/linalg/solvers/power_iteration.hpp"
 #include "util/init.hpp"
 #include "util/table.hpp"
 
@@ -40,9 +36,6 @@ using grid::shell::DistributedDomain;
 using grid::shell::DomainInfo;
 using grid::shell::SubdomainInfo;
 using linalg::VectorQ1Scalar;
-using terra::linalg::solvers::TwoGridGCA;
-using terra::linalg::DiagonallyScaledOperator;
-using terra::linalg::solvers::power_iteration;
 
 template < std::floating_point T >
 struct SolutionInterpolator
@@ -129,11 +122,11 @@ struct SetOnBoundary
 };
 
 template < std::floating_point T, typename Prolongation, typename Restriction >
-T test( int min_level, int max_level, const std::shared_ptr< util::Table >& table, int prepost_smooth )
+T test( int min_level, int max_level, const std::shared_ptr< util::Table >& table, int order, int prepost_smooth )
 {
     using ScalarType       = T;
     using Laplace          = fe::wedge::operators::shell::LaplaceSimple< ScalarType >;
-    using Smoother         = linalg::solvers::Jacobi< Laplace >;
+    using Smoother         = linalg::solvers::Chebyshev< Laplace >;
     using CoarseGridSolver = linalg::solvers::PCG< Laplace >;
 
     std::cout << "min_level = " << min_level << ", max_level = " << max_level << std::endl;
@@ -157,10 +150,12 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
 
     std::vector< VectorQ1Scalar< ScalarType > > coarse_grid_tmps;
 
-    std::cout << "Creating domains..." << std::endl;
     for ( int level = 0; level <= max_level; level++ )
     {
         auto domain = DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, 0.5, 1.0 );
+        //auto level_subdomains = 2;
+        //auto domain = DistributedDomain::create_uniform( level, level, 0.5, 1.0, level_subdomains, level_subdomains );
+
         domains.push_back( domain );
 
         subdomain_shell_coords.push_back(
@@ -171,19 +166,26 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
         boundary_mask_data.push_back( grid::shell::setup_boundary_mask_data( domain ) );
     }
 
-    std::cout << "Creating operators..." << std::endl;
-    bool    single_qp = true;
-    Laplace A( domains.back(), subdomain_shell_coords.back(), subdomain_radii.back(), true, false, single_qp );
-    A.store_lmatrices();
-    Laplace A_neumann( domains.back(), subdomain_shell_coords.back(), subdomain_radii.back(), false, false, single_qp );
-    A_neumann.store_lmatrices();
-    Laplace A_neumann_diag(
-        domains.back(), subdomain_shell_coords.back(), subdomain_radii.back(), false, true, single_qp );
-
-    // setup operators (prolongation, restriction, matrix storage)
     for ( int level = min_level; level <= max_level; level++ )
     {
         tmp.emplace_back( "tmp_level_" + std::to_string( level ), domains[level], mask_data[level] );
+
+        std::vector< VectorQ1Scalar< ScalarType > > tmps_smoother;
+        for ( int i = 0; i < 2; i++ )
+        {
+            tmps_smoother.emplace_back(
+                "tmp_smoothers_level_" + std::to_string( level ), domains[level], mask_data[level] );
+        }
+
+        VectorQ1Scalar< ScalarType > inverse_diagonal(
+            "inv_diag_level_" + std::to_string( level ), domains[level], mask_data[level] );
+        Laplace A_diag( domains[level], subdomain_shell_coords[level], subdomain_radii[level], true, true );
+        assign( tmps_smoother[0], 1.0 );
+        apply( A_diag, tmps_smoother[0], inverse_diagonal );
+
+        linalg::invert_entries( inverse_diagonal );
+
+        smoothers.emplace_back( order, inverse_diagonal, tmps_smoother, prepost_smooth );
 
         if ( level == min_level )
         {
@@ -200,10 +202,7 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
             tmp_r_c.emplace_back( "tmp_r_c_level_" + std::to_string( level ), domains[level], mask_data[level] );
             tmp_e_c.emplace_back( "tmp_e_c_level_" + std::to_string( level ), domains[level], mask_data[level] );
 
-            A_c.emplace_back(
-                domains[level], subdomain_shell_coords[level], subdomain_radii[level], true, false, single_qp );
-            A_c.back().set_single_quadpoint( true );
-            A_c.back().store_lmatrices();
+            A_c.emplace_back( domains[level], subdomain_shell_coords[level], subdomain_radii[level], true, false );
 
             if constexpr ( std::is_same_v<
                                Prolongation,
@@ -211,6 +210,7 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
             {
                 P_additive.emplace_back(
                     subdomain_shell_coords[level + 1], subdomain_radii[level + 1], linalg::OperatorApplyMode::Add );
+                //R.emplace_back( domains[level] );
                 R.emplace_back( domains[level], subdomain_shell_coords[level + 1], subdomain_radii[level + 1] );
             }
             else if constexpr ( std::is_same_v<
@@ -227,85 +227,17 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
         }
     }
 
-    // setup gca coarse ops
-    if ( true )
-    {
-        std::cout << "Forming gca coarse-grid ..." << std::endl;
-        for ( int level = max_level - 1; level >= min_level; level-- )
-        {
-            if ( level == max_level - 1 )
-            {
-                TwoGridGCA< ScalarType, Laplace >( A_neumann, A_c[level - min_level] );
-            }
-            else
-            {
-                TwoGridGCA< ScalarType, Laplace >( A_c[level + 1 - min_level], A_c[level - min_level] );
-            }
-        }
-    }
-
-    // setup smoothers
-    std::cout << "Creating smoothers..." << std::endl;
-    for ( int level = min_level; level <= max_level; level++ )
-    {
-        VectorQ1Scalar< ScalarType > tmp_smoother(
-            "tmp_smoothers_level_" + std::to_string( level ), domains[level], mask_data[level] );
-        VectorQ1Scalar< ScalarType > tmp_pi_0(
-            "tmp_pi_0_level_" + std::to_string( level ), domains[level], mask_data[level] );
-        VectorQ1Scalar< ScalarType > tmp_pi_1(
-            "tmp_pi_1_level_" + std::to_string( level ), domains[level], mask_data[level] );
-        VectorQ1Scalar< ScalarType > inverse_diagonal(
-            "inv_diag_level_" + std::to_string( level ), domains[level], mask_data[level] );
-        assign( tmp_smoother, 1.0 );
-        if ( level < max_level )
-        {
-            A_c[level - min_level].set_single_quadpoint( single_qp );
-            A_c[level - min_level].set_diagonal( true );
-            apply( A_c[level - min_level], tmp_smoother, inverse_diagonal );
-            A_c[level - min_level].set_diagonal( false );
-        }
-        else
-        {
-            A.set_single_quadpoint( single_qp );
-            A.set_diagonal( true );
-            //A.set_single_quadpoint( false );
-            apply( A, tmp_smoother, inverse_diagonal );
-            //A.set_single_quadpoint( true );
-            A.set_diagonal( false );
-        }
-
-        linalg::invert_entries( inverse_diagonal );
-
-        // determine estimate for maximum eigenvalue
-        T max_ev = 0.0;
-        if ( level < max_level )
-        {
-            DiagonallyScaledOperator< Laplace > inv_diag_A( A_c[level - min_level], inverse_diagonal );
-            max_ev = power_iteration< DiagonallyScaledOperator< Laplace > >( inv_diag_A, tmp_pi_0, tmp_pi_1, 100 );
-        }
-        else
-        {
-            DiagonallyScaledOperator< Laplace > inv_diag_A( A, inverse_diagonal );
-            max_ev = power_iteration< DiagonallyScaledOperator< Laplace > >( inv_diag_A, tmp_pi_0, tmp_pi_1, 100 );
-        }
-
-        // compute optimal jacobi weight: omega_opt = 2/(lambda_min + lambda_max)
-        T omega_opt = 2.0 / ( 1.5 * max_ev );
-        std::cout << "Maximum ev on level " << level << ": " << max_ev << ", optimal omega: " << omega_opt << std::endl;
-
-        smoothers.emplace_back( inverse_diagonal, prepost_smooth, tmp_smoother, omega_opt );
-    }
-
     VectorQ1Scalar< ScalarType > u( "u", domains.back(), mask_data.back() );
     VectorQ1Scalar< ScalarType > f( "f", domains.back(), mask_data.back() );
     VectorQ1Scalar< ScalarType > solution( "solution", domains.back(), mask_data.back() );
     VectorQ1Scalar< ScalarType > error( "error", domains.back(), mask_data.back() );
-    VectorQ1Scalar< ScalarType > Adiagg( "Adiagg", domains.back(), mask_data.back() );
-    VectorQ1Scalar< ScalarType > tmp_cg( "tmp_cg", domains.back(), mask_data.back() );
-    VectorQ1Scalar< ScalarType > r( "r", domains.back(), mask_data.back() );
 
     const auto num_dofs = kernels::common::count_masked< long >( mask_data.back(), grid::NodeOwnershipFlag::OWNED );
     std::cout << "num_dofs = " << num_dofs << std::endl;
+
+    Laplace A( domains.back(), subdomain_shell_coords.back(), subdomain_radii.back(), true, false );
+    Laplace A_neumann( domains.back(), subdomain_shell_coords.back(), subdomain_radii.back(), false, false );
+    Laplace A_neumann_diag( domains.back(), subdomain_shell_coords.back(), subdomain_radii.back(), false, true );
 
     using Mass = fe::wedge::operators::shell::Mass< ScalarType >;
 
@@ -348,7 +280,7 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
 
     Kokkos::fence();
 
-    linalg::solvers::IterativeSolverParameters solver_params{ 1000, 1e-6, 1e-6 };
+    linalg::solvers::IterativeSolverParameters solver_params{ 100, 1e-7, 1e-7 };
 
     CoarseGridSolver coarse_grid_solver( solver_params, table, coarse_grid_tmps );
 
@@ -359,11 +291,6 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
 
     assign( u, 1.0 );
 
-    linalg::solvers::PCG< Laplace, Smoother > pcg(
-        solver_params, table, { tmp_cg, Adiagg, error, r }, smoothers.back() );
-    pcg.set_tag( "pcg_solver" );
-
-    std::cout << "Solving ..." << std::endl;
     Kokkos::fence();
     Kokkos::Timer timer;
     timer.reset();
@@ -380,7 +307,6 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
         xdmf.add( u.grid_data() );
         xdmf.add( solution.grid_data() );
         xdmf.add( error.grid_data() );
-        xdmf.add( smoothers.back().get_inverse_diagonal().grid_data() );
         xdmf.write();
     }
 
@@ -397,41 +323,33 @@ T test( int min_level, int max_level, const std::shared_ptr< util::Table >& tabl
 template < std::floating_point T >
 int run_test()
 {
-    T prev_l2_error = 1.0;
+    const int     level          = 4;
+    constexpr int prepost_smooth = 1;
 
-    const int max_level = 7;
-
-    constexpr int prepost_smooth = 3;
-
-    for ( int level = 1; level <= max_level; level++ )
+    for ( int order = 1; order <= 5; ++order )
     {
         auto table = std::make_shared< util::Table >();
 
         Kokkos::Timer timer;
         timer.reset();
 
-        T l2_error = test<
+        auto err = test<
             T,
             fe::wedge::operators::shell::ProlongationLinear< T >,
-            fe::wedge::operators::shell::RestrictionLinear< T > >( 0, level, table, prepost_smooth );
+            fe::wedge::operators::shell::RestrictionLinear< T > >( 0, level, table, order, prepost_smooth );
 
         const auto time_total = timer.seconds();
-        table->add_row( { { "tag", "time_total" }, { "level", level }, { "time_total", time_total } } );
+        table->add_row(
+            { { "tag", "time_total" }, { "level", level }, { "time_total", time_total }, { "order", order } } );
 
-        if ( level > 1 )
-        {
-            std::cout << "l2_error = " << l2_error << std::endl;
-            const T order = prev_l2_error / l2_error;
-            std::cout << "order = " << order << std::endl;
+        util::logroot << "\n\nOrder: " << order << "\n\n";
 
-            table->add_row( { { "level", level }, { "order", prev_l2_error / l2_error } } );
-        }
-        prev_l2_error = l2_error;
+        util::logroot << "err = " << err << "\n\n";
 
         table->query_rows_equals( "tag", "multigrid" ).print_pretty();
         // table->query_rows_equals( "tag", "pcg_solver" ).print_pretty();
-        table->query_rows_equals( "tag", "time_solver" ).print_pretty();
-        table->query_rows_equals( "tag", "time_total" ).print_pretty();
+        // table->query_rows_equals( "tag", "time_solver" ).print_pretty();
+        // table->query_rows_equals( "tag", "time_total" ).print_pretty();
     }
 
     return EXIT_SUCCESS;

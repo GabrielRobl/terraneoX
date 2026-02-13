@@ -15,7 +15,7 @@ inline void print_general_info( int argc, char** argv, std::ostream& out = logro
     const auto now_c = clock::to_time_t( now );
 
     out << "=========================================\n";
-    out << "          TerraNeo X - Run Info          \n";
+    out << "          TerraNeo - Run Info          \n";
     out << "=========================================\n";
 
     out << "Wall time start : " << std::put_time( std::localtime( &now_c ), "%Y-%m-%d %H:%M:%S" ) << "\n";
@@ -52,7 +52,6 @@ inline void print_general_info( int argc, char** argv, std::ostream& out = logro
     out << "MPI rank        : " << mpi_rank << "\n";
     out << "Kokkos threads  : " << threads << "\n";
     out << "Kokkos devices  : " << devices << "\n";
-
     // Kokkos defaults
     using ExecSpace = Kokkos::DefaultExecutionSpace;
     using MemSpace  = ExecSpace::memory_space;
@@ -64,7 +63,7 @@ inline void print_general_info( int argc, char** argv, std::ostream& out = logro
     char hostname[256];
     if ( gethostname( hostname, sizeof( hostname ) ) == 0 )
     {
-        out << "Hostname        : " << hostname << "\n";
+        logall << "Rank " << mpi_rank << ": device id = " << Kokkos::device_id() << ", node = " << hostname << std::endl;
     }
 #endif
 

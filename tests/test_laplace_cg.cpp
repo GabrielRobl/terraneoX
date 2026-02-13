@@ -3,9 +3,8 @@
 #include "../src/terra/communication/shell/communication.hpp"
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
 #include "fe/wedge/integrands.hpp"
-#include "fe/wedge/operators/shell/laplace_kerngen.hpp"
-#include "fe/wedge/operators/shell/laplace_simple.hpp"
 #include "fe/wedge/operators/shell/laplace.hpp"
+#include "fe/wedge/operators/shell/laplace_simple.hpp"
 #include "linalg/solvers/pcg.hpp"
 #include "linalg/solvers/richardson.hpp"
 #include "terra/dense/mat.hpp"
@@ -135,12 +134,12 @@ double test( int level, const std::shared_ptr< util::Table >& table )
     const auto coords_shell = terra::grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domain );
     const auto coords_radii = terra::grid::shell::subdomain_shell_radii< ScalarType >( domain );
 
-    using Laplace = fe::wedge::operators::shell::LaplaceKerngen< ScalarType >;
+    using Laplace = fe::wedge::operators::shell::Laplace< ScalarType >;
 
-    Laplace A( domain, coords_shell, coords_radii, true, false );
-    Laplace A_neumann( domain, coords_shell, coords_radii,false, false );
-    Laplace A_neumann_diag( domain, coords_shell, coords_radii, false, true );
-   
+    Laplace A( domain, coords_shell, coords_radii, boundary_mask_data, true, false );
+    Laplace A_neumann( domain, coords_shell, coords_radii, boundary_mask_data, false, false );
+    Laplace A_neumann_diag( domain, coords_shell, coords_radii, boundary_mask_data, false, true );
+
     using Mass = fe::wedge::operators::shell::Mass< ScalarType >;
 
     Mass M( domain, coords_shell, coords_radii, false );
@@ -230,7 +229,6 @@ int main( int argc, char** argv )
             const double order = prev_l2_error / l2_error;
             std::cout << "error = " << l2_error << std::endl;
             std::cout << "order = " << order << std::endl;
-            
 
             table->add_row( { { "level", level }, { "order", prev_l2_error / l2_error } } );
         }

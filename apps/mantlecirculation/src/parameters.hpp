@@ -19,6 +19,18 @@ struct MeshParameters
     double radius_max = 1.0;
 };
 
+struct BoundaryConditionsParameters
+{
+    enum class VelocityBC
+    {
+        NO_SLIP,
+        FREE_SLIP,
+    };
+
+    VelocityBC velocity_bc_cmb     = VelocityBC::NO_SLIP;
+    VelocityBC velocity_bc_surface = VelocityBC::NO_SLIP;
+};
+
 struct ViscosityParameters
 {
     bool        radial_profile_enabled       = false;
@@ -43,7 +55,8 @@ struct StokesSolverParameters
     double krylov_relative_tolerance = 1e-6;
     double krylov_absolute_tolerance = 1e-12;
 
-    int viscous_pc_num_vcycles                 = 2;
+    int viscous_pc_num_vcycles                 = 1;
+    int viscous_pc_chebyshev_order             = 2;
     int viscous_pc_num_smoothing_steps_prepost = 2;
     int viscous_pc_num_power_iterations        = 10;
 };
@@ -74,16 +87,20 @@ struct IOParameters
     std::string xdmf_dir                = "xdmf";
     std::string radial_profiles_out_dir = "radial_profiles";
     std::string timer_trees_dir         = "timer_trees";
+
+    std::string checkpoint_dir;
+    int         checkpoint_step = -1;
 };
 
 struct Parameters
 {
-    MeshParameters         mesh_parameters;
-    StokesSolverParameters stokes_solver_parameters;
-    EnergySolverParameters energy_solver_parameters;
-    PhysicsParameters      physics_parameters;
-    TimeSteppingParameters time_stepping_parameters;
-    IOParameters           io_parameters;
+    MeshParameters               mesh_parameters;
+    BoundaryConditionsParameters boundary_conditions_parameters;
+    StokesSolverParameters       stokes_solver_parameters;
+    EnergySolverParameters       energy_solver_parameters;
+    PhysicsParameters            physics_parameters;
+    TimeSteppingParameters       time_stepping_parameters;
+    IOParameters                 io_parameters;
 
     std::string output_config_file;
 };
@@ -130,6 +147,31 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
 
     add_option_with_default( app, "--radius-min", parameters.mesh_parameters.radius_min )->group( "Domain" );
     add_option_with_default( app, "--radius-max", parameters.mesh_parameters.radius_max )->group( "Domain" );
+
+    ///////////////////////////
+    /// Boundary conditions ///
+    ///////////////////////////
+
+    std::map< std::string, BoundaryConditionsParameters::VelocityBC > velocity_bc_cmb_map{
+        { "noslip", BoundaryConditionsParameters::VelocityBC::NO_SLIP },
+        { "freeslip", BoundaryConditionsParameters::VelocityBC::FREE_SLIP },
+    };
+
+    std::map< std::string, BoundaryConditionsParameters::VelocityBC > velocity_bc_surface_map{
+        { "noslip", BoundaryConditionsParameters::VelocityBC::NO_SLIP },
+        { "freeslip", BoundaryConditionsParameters::VelocityBC::FREE_SLIP },
+    };
+
+    add_option_with_default( app, "--velocity-bc-cmb", parameters.boundary_conditions_parameters.velocity_bc_cmb )
+        ->transform( CLI::CheckedTransformer( velocity_bc_cmb_map, CLI::ignore_case ) )
+        ->default_val( "noslip" )
+        ->group( "Boundary Conditions" );
+
+    add_option_with_default(
+        app, "--velocity-bc-surface", parameters.boundary_conditions_parameters.velocity_bc_surface )
+        ->transform( CLI::CheckedTransformer( velocity_bc_surface_map, CLI::ignore_case ) )
+        ->default_val( "noslip" )
+        ->group( "Boundary Conditions" );
 
     //////////////////////////////
     /// Geophysical parameters ///
@@ -180,7 +222,11 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default( app, "--t-end", parameters.time_stepping_parameters.t_end )
         ->group( "Time Discretization" );
     add_option_with_default( app, "--max-timesteps", parameters.time_stepping_parameters.max_timesteps )
-        ->group( "Time Discretization" );
+        ->group( "Time Discretization" )
+        ->description(
+            "Simulation aborts when this time step index is reached. "
+            "If a checkpoint is loaded, the simulation will start at the next step after the loaded checkpoint. "
+            "This means the number of time steps executed might be smaller than what is passed in here." );
     add_option_with_default( app, "--energy-substeps", parameters.time_stepping_parameters.energy_substeps )
         ->group( "Time Discretization" );
 
@@ -203,6 +249,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         app, "--stokes-viscous-pc-num-vcycles", parameters.stokes_solver_parameters.viscous_pc_num_vcycles )
         ->group( "Stokes Solver" );
     add_option_with_default(
+        app, "--stokes-viscous-pc-cheby-order", parameters.stokes_solver_parameters.viscous_pc_chebyshev_order )
+        ->group( "Stokes Solver" );
+    add_option_with_default(
         app,
         "--stokes-viscous-pc-num-smoothing-steps-prepost",
         parameters.stokes_solver_parameters.viscous_pc_num_smoothing_steps_prepost )
@@ -213,12 +262,31 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         parameters.stokes_solver_parameters.viscous_pc_num_power_iterations )
         ->group( "Stokes Solver" );
 
+    /////////////////////
+    /// Energy solver ///
+    /////////////////////
+
+    add_option_with_default( app, "--energy-krylov-restart", parameters.energy_solver_parameters.krylov_restart )
+        ->group( "Energy Solver" );
+    add_option_with_default(
+        app, "--energy-krylov-max-iterations", parameters.energy_solver_parameters.krylov_max_iterations )
+        ->group( "Energy Solver" );
+    add_option_with_default(
+        app, "--energy-krylov-relative-tolerance", parameters.energy_solver_parameters.krylov_relative_tolerance )
+        ->group( "Energy Solver" );
+    add_option_with_default(
+        app, "--energy-krylov-absolute-tolerance", parameters.energy_solver_parameters.krylov_absolute_tolerance )
+        ->group( "Energy Solver" );
+
     //////////////////////
     /// Input / output ///
     //////////////////////
 
     add_option_with_default( app, "--outdir", parameters.io_parameters.outdir )->group( "I/O" );
     add_flag_with_default( app, "--outdir-overwrite", parameters.io_parameters.overwrite )->group( "I/O" );
+
+    add_option_with_default( app, "--checkpoint-dir", parameters.io_parameters.checkpoint_dir )->group( "I/O" );
+    add_option_with_default( app, "--checkpoint-step", parameters.io_parameters.checkpoint_step )->group( "I/O" );
 
     try
     {

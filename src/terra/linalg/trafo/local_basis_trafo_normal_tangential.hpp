@@ -125,6 +125,7 @@ void cartesian_to_normal_tangential_in_place(
             }
 
             dense::Vec< ScalarType, 3 > normal;
+            //int sign = flag == grid::shell::ShellBoundaryFlag::CMB ? -1 : 1;
             for ( int d = 0; d < 3; ++d )
             {
                 normal( d ) = coords_shell( local_subdomain, i, j, d );

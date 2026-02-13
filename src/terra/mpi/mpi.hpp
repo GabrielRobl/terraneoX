@@ -21,6 +21,11 @@ inline int num_processes()
     return num_processes;
 }
 
+inline void barrier()
+{  
+    MPI_Barrier(MPI_COMM_WORLD);
+}
+
 namespace detail {
 class MPIContext
 {
@@ -197,6 +202,12 @@ template <>
 inline MPI_Datatype mpi_datatype< long double >()
 {
     return MPI_LONG_DOUBLE;
+}
+
+template <>
+inline MPI_Datatype mpi_datatype< bool >()
+{
+    return MPI_CXX_BOOL;
 }
 
 } // namespace terra::mpi

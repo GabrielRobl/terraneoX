@@ -6,6 +6,7 @@
 #include "fe/wedge/operators/shell/vector_laplace_simple.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
 #include "linalg/solvers/pcg.hpp"
+#include "grid/shell/bit_masks.hpp"
 #include "linalg/solvers/pminres.hpp"
 #include "linalg/solvers/richardson.hpp"
 #include "linalg/vector_q1isoq2_q1.hpp"
@@ -32,6 +33,13 @@ using grid::shell::SubdomainInfo;
 using linalg::VectorQ1IsoQ2Q1;
 using linalg::VectorQ1Scalar;
 using linalg::VectorQ1Vec;
+using grid::shell::BoundaryConditions;
+using grid::shell::BoundaryConditionFlag::DIRICHLET;
+using grid::shell::BoundaryConditionFlag::FREESLIP;
+using grid::shell::BoundaryConditionFlag::NEUMANN;
+using grid::shell::ShellBoundaryFlag::BOUNDARY;
+using grid::shell::ShellBoundaryFlag::CMB;
+using grid::shell::ShellBoundaryFlag::SURFACE;
 
 #define SOLUTION_TYPE 1
 
@@ -229,6 +237,8 @@ std::pair< double, double > test( int level, const std::shared_ptr< util::Table 
     auto mask_data_fine   = grid::setup_node_ownership_mask_data( domain_fine );
     auto mask_data_coarse = grid::setup_node_ownership_mask_data( domain_coarse );
 
+    auto boundary_mask_data_fine = grid::shell::setup_boundary_mask_data( domain_fine );
+
     // K w = b
 
     VectorQ1IsoQ2Q1< ScalarType > w( "w", domain_fine, domain_coarse, mask_data_fine, mask_data_coarse );
@@ -253,11 +263,40 @@ std::pair< double, double > test( int level, const std::shared_ptr< util::Table 
     const auto num_dofs_pressure =
         kernels::common::count_masked< long >( mask_data_coarse, grid::NodeOwnershipFlag::OWNED );
 
-    using Stokes = fe::wedge::operators::shell::Stokes< ScalarType >;
+    using Stokes           = fe::wedge::operators::shell::Stokes< ScalarType >;
+    BoundaryConditions bcs = {
+        { CMB, DIRICHLET },
+        { SURFACE, DIRICHLET },
+    };
+    BoundaryConditions bcs_neumann = {
+        { CMB, NEUMANN },
+        { SURFACE, NEUMANN },
+    };
 
-    Stokes K( domain_fine, domain_coarse, subdomain_fine_shell_coords, subdomain_fine_radii, true, false );
-    Stokes K_neumann( domain_fine, domain_coarse, subdomain_fine_shell_coords, subdomain_fine_radii, false, false );
-    Stokes K_neumann_diag( domain_fine, domain_coarse, subdomain_fine_shell_coords, subdomain_fine_radii, false, true );
+    Stokes K(
+        domain_fine,
+        domain_coarse,
+        subdomain_fine_shell_coords,
+        subdomain_fine_radii,
+        boundary_mask_data_fine,
+        bcs,
+        false );
+    Stokes K_neumann(
+        domain_fine,
+        domain_coarse,
+        subdomain_fine_shell_coords,
+        subdomain_fine_radii,
+        boundary_mask_data_fine,
+        bcs_neumann,
+        false );
+    Stokes K_neumann_diag(
+        domain_fine,
+        domain_coarse,
+        subdomain_fine_shell_coords,
+        subdomain_fine_radii,
+        boundary_mask_data_fine,
+        bcs_neumann,
+        true );
 
     using Mass = fe::wedge::operators::shell::VectorMass< ScalarType, 3 >;
 

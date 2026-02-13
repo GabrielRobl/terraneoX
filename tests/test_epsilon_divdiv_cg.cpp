@@ -11,6 +11,7 @@
 #include "linalg/solvers/richardson.hpp"
 #include "terra/dense/mat.hpp"
 #include "terra/fe/wedge/operators/shell/mass.hpp"
+#include "grid/shell/bit_masks.hpp"
 #include "terra/grid/grid_types.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
 #include "terra/io/vtk.hpp"
@@ -31,6 +32,13 @@ using grid::shell::DomainInfo;
 using grid::shell::SubdomainInfo;
 using linalg::VectorQ1Scalar;
 using linalg::VectorQ1Vec;
+using grid::shell::BoundaryConditions;
+using grid::shell::BoundaryConditionFlag::DIRICHLET;
+using grid::shell::BoundaryConditionFlag::FREESLIP;
+using grid::shell::BoundaryConditionFlag::NEUMANN;
+using grid::shell::ShellBoundaryFlag::BOUNDARY;
+using grid::shell::ShellBoundaryFlag::CMB;
+using grid::shell::ShellBoundaryFlag::SURFACE;
 
 struct SolutionInterpolator
 {
@@ -213,6 +221,8 @@ struct SetOnBoundary
     }
 };
 
+
+
 double test( int level, const std::shared_ptr< util::Table >& table )
 {
     Kokkos::Timer timer;
@@ -249,11 +259,23 @@ double test( int level, const std::shared_ptr< util::Table >& table )
     Kokkos::fence();
     using Epsilon = fe::wedge::operators::shell::EpsilonDivDivKerngen< ScalarType, 3 >;
 
-    Epsilon A( domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), true, false );
+
+     // define boundaries: assign to each ShellBoundary flag occuring at the boundary in boundary_mask_data
+    // a type of PDE boundary condition
+    BoundaryConditions bcs = {
+        { CMB, DIRICHLET },
+        { SURFACE, DIRICHLET },
+    };
+    BoundaryConditions bcs_neumann = {
+        { CMB, NEUMANN },
+        { SURFACE, NEUMANN },
+    };
+
+    Epsilon A( domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), bcs, false );
     Epsilon A_neumann(
-        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), false, false );
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), bcs_neumann, false );
     Epsilon A_neumann_diag(
-        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), false, true );
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), bcs_neumann, true );
 
     using Mass = fe::wedge::operators::shell::VectorMass< ScalarType, 3 >;
 

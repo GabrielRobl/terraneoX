@@ -11,6 +11,7 @@
 #include "communication/buffer_copy_kernels.hpp"
 #include "dense/vec.hpp"
 #include "mpi/mpi.hpp"
+#include "util/logging.hpp"
 
 namespace terra::grid::shell {
 
@@ -50,6 +51,104 @@ std::vector< T > uniform_shell_radii( T r_min, T r_max, int num_shells )
     return radii;
 }
 
+/// @brief Map to be used in @ref mapped_shell_radii.
+///
+/// Can be used to have smaller elements near the shell boundaries.
+///
+/// Returns a function
+/// \f[
+///     f(s) := \begin{cases}
+///         s & k \leq 0 \\
+///         \frac{1}{2} \frac{\tanh( k( 2s-1 ) )}{\tanh(k) + 1} & k > 0
+///     \end{cases}
+/// \f]
+///
+/// @param k \f$k = 0\f$ results in a uniform distribution (linear function), \f$k > 0\f$ refines at the boundary
+///        (roughly: \f$k \approx 1\f$: mild clustering, \f$k \approx 2\f$: strong clustering)
+template < std::floating_point T >
+std::function< T( T ) > make_tanh_boundary_cluster( T k )
+{
+    return [k]( T s ) {
+        if ( k <= 0.0 )
+        {
+            return s;
+        }
+
+        T x = T( 2 ) * s - T( 1 ); // map [0,1] -> [-1,1]
+        return ( std::tanh( k * x ) / std::tanh( k ) + T( 1 ) ) * T( 0.5 );
+    };
+}
+
+/// @brief Computes the radial shell radii for a non-uniformly distributed grid.
+///
+/// Note that a shell is a 2D manifold in 3D space.
+/// A layer is a 3D volume in 3D space – it is sandwiched by two shells (one on each side).
+///
+/// The shell radii are generated from a uniform parameter (\f$N\f$ is the number of shells)
+/// \f[
+///     s_i = \frac{i}{N-1}, \; i = 0,\dots,N-1,
+/// \f]
+/// which is mapped to a redistributed parameter
+/// \f[
+///   t_i = f(s_i)
+/// \f]
+/// using a user-supplied function
+/// \f[
+///     f : [0,1] \rightarrow [0,1].
+/// \f]
+/// The physical radii are then computed as
+/// \f[
+///     r_i = r_{\min} + (r_{\max} - r_{\min}) \, t_i .
+/// \f]
+///
+/// The function \f$f(s) = s\f$ therefore maps the shells uniformly.
+/// In areas where the gradient of \f$f\f$ is small, shells are closer together.
+/// In areas where the gradient of \f$f\f$ is large, shells are further apart.
+///
+/// Try @ref make_tanh_boundary_cluster which returns a parameterized function that can be passed to this function.
+///
+/// @tparam T Floating-point type.
+///
+/// @param r_min Radius of the innermost shell.
+/// @param r_max Radius of the outermost shell.
+/// @param num_shells Number of shells \f$ N \f$.
+/// @param map Mapping function \f$ f : [0,1] \rightarrow [0,1] \f$ controlling shell distribution.
+///            It should be monotone increasing and satisfy
+///            \f$ f(0)=0 \f$ and \f$ f(1)=1 \f$.
+///
+/// @return Vector of shell radii (non-uniformly distributed in \f$[r_{\min}, r_{\max}]\f$).
+template < std::floating_point T >
+std::vector< T > mapped_shell_radii( T r_min, T r_max, int num_shells, const std::function< T( T ) >& map )
+{
+    if ( num_shells < 2 )
+    {
+        Kokkos::abort( "Number of shells must be at least 2." );
+    }
+
+    if ( r_min >= r_max )
+    {
+        Kokkos::abort( "r_min must be strictly less than r_max." );
+    }
+
+    std::vector< T > radii;
+    radii.reserve( num_shells );
+
+    const T inv = T( 1 ) / T( num_shells - 1 );
+
+    for ( int i = 0; i < num_shells; ++i )
+    {
+        T s = T( i ) * inv; // uniform in [0,1]
+        T t = map( s );     // redistributed in [0,1]
+        radii.push_back( r_min + ( r_max - r_min ) * t );
+    }
+
+    // Enforce exact boundaries
+    radii.front() = r_min;
+    radii.back()  = r_max;
+
+    return radii;
+}
+
 /// @brief Computes the min absolute distance of two entries in the passed vector of shell radii.
 template < std::floating_point T >
 T min_radial_h( const std::vector< T >& shell_radii )
@@ -64,6 +163,27 @@ T min_radial_h( const std::vector< T >& shell_radii )
     {
         T d = std::abs( shell_radii[i] - shell_radii[i - 1] );
         if ( d < min_dist )
+        {
+            min_dist = d;
+        }
+    }
+    return min_dist;
+}
+
+/// @brief Computes the max absolute distance of two entries in the passed vector of shell radii.
+template < std::floating_point T >
+T max_radial_h( const std::vector< T >& shell_radii )
+{
+    if ( shell_radii.size() < 2 )
+    {
+        throw std::runtime_error( " Need at least two shells to compute h. " );
+    }
+
+    T min_dist = 0;
+    for ( size_t i = 1; i < shell_radii.size(); ++i )
+    {
+        T d = std::abs( shell_radii[i] - shell_radii[i - 1] );
+        if ( d > min_dist )
         {
             min_dist = d;
         }
