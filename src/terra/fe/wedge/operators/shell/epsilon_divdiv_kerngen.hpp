@@ -239,7 +239,7 @@ class EpsilonDivDivKerngen
         // (easier on the explicitly assembled matrix)
         bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
         bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
-        if ( operator_stored_matrix_mode_ != linalg::OperatorStoredMatrixMode::Off || at_cmb || at_surface )
+        if ( operator_stored_matrix_mode_ != linalg::OperatorStoredMatrixMode::Off)// || at_cmb || at_surface )
         {
             dense::Mat< ScalarT, LocalMatrixDim, LocalMatrixDim > A[num_wedges_per_hex_cell] = { 0 };
 
@@ -553,12 +553,14 @@ class EpsilonDivDivKerngen
             qp_array[0][1]          = 0.33333333333333331;
             qp_array[0][2]          = 0.0;
             qw_array[0]             = 1.0;
-            int at_cmb_boundary     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
-            int at_surface_boundary = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
-            int cmb_shift = ( ( false && diagonal_ == false && at_cmb_boundary != 0 ) ? ( 3 ) : ( 0 ) );
+            bool at_boundary = at_cmb || at_surface;
+            ShellBoundaryFlag     sbf = at_cmb ? CMB : SURFACE;
+            BoundaryConditionFlag bcf = get_boundary_condition_flag( bcs_, sbf );
+            bool treat_boundary = bcf == DIRICHLET;
+            int cmb_shift = ( ( at_boundary && treat_boundary && diagonal_ == false && at_cmb) ? ( 3 ) : ( 0 ) );
             int max_rad   = radii_.extent( 1 ) - 1;
             int surface_shift =
-                ( ( false && diagonal_ == false && at_surface_boundary != 0 ) ? ( 3 ) : ( 0 ) );
+                ( (  at_boundary && treat_boundary && at_surface ) ? ( 3 ) : ( 0 ) );
             double dst_array[3][2][6] = { 0 };
             int    w                  = 0;
             /* Apply local matrix for both wedges and accumulated for all quadrature points. */;
@@ -729,7 +731,7 @@ class EpsilonDivDivKerngen
                     /* Loop to apply BCs or only the diagonal of the operator. */;
                     for ( dim_diagBC = 0; dim_diagBC < 3; dim_diagBC += 1 )
                     {
-                        if ( diagonal_ || false && ( at_cmb_boundary != 0 || at_surface_boundary != 0 ) )
+                        if ( diagonal_ || treat_boundary && at_boundary && ( at_cmb || at_surface ) )
                         {
                             int node_idx;
                             for ( node_idx = surface_shift; node_idx < 6 - cmb_shift; node_idx += 1 )

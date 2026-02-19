@@ -46,6 +46,29 @@ void strong_algebraic_dirichlet_enforcement_poisson_like(
     kernels::common::assign_masked_else_keep_old( b.grid_data(), tmp.grid_data(), mask_data, dirichlet_boundary_mask );
 }
 
+template < typename ScalarType, linalg::OperatorLike OperatorType, typename FlagType >
+void strong_algebraic_dirichlet_enforcement_vectorlaplace_like(
+    OperatorType&                               A_neumann,
+    OperatorType&                               A_neumann_diag,
+    const linalg::VectorQ1Vec< ScalarType >& g,
+    linalg::VectorQ1Vec< ScalarType >&       tmp,
+    linalg::VectorQ1Vec< ScalarType >&       b,
+    const grid::Grid4DDataScalar< FlagType >&   mask_data,
+    const FlagType&                             dirichlet_boundary_mask )
+{
+    // g_A <- A * g
+    linalg::apply( A_neumann, g, tmp );
+
+    // b_elim <- b - g_A
+    linalg::lincomb( b, { 1.0, -1.0 }, { b, tmp } );
+
+    // g_D <- diag(A) * g
+    linalg::apply( A_neumann_diag, g, tmp );
+
+    // b_elim <- g_D on the Dirichlet boundary
+    kernels::common::assign_masked_else_keep_old( b.grid_data(), tmp.grid_data(), mask_data, dirichlet_boundary_mask );
+}
+
 /// @brief Same as strong_algebraic_dirichlet_enforcement_poisson_like() for homogenous boundary conditions (\f$ g = 0 \f$).
 ///
 /// Does not require most of the steps since \f$ g = g_A = g_D = 0 \f$.
