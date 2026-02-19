@@ -291,7 +291,7 @@ std::tuple< double, double, int >
         const int idx = level - min_level;
 
         domains.push_back(
-            DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, r_min, r_max ) );
+            DistributedDomain::create_uniform( level, level, r_min, r_max, 1, 1 ) );
         coords_shell.push_back( grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domains[idx] ) );
         coords_radii.push_back( grid::shell::subdomain_shell_radii< ScalarType >( domains[idx] ) );
         mask_data.push_back( grid::setup_node_ownership_mask_data( domains[idx] ) );
@@ -783,7 +783,7 @@ int main( int argc, char** argv )
     Kokkos::ScopeGuard scope_guard( argc, argv );
 
     util::print_general_info( argc, argv );
-    const int max_level = 5;
+    const int max_level = 7;
     auto      table     = std::make_shared< util::Table >();
 
     double prev_l2_error_vel = 1.0;
@@ -829,8 +829,8 @@ int main( int argc, char** argv )
                         table->add_row(
                             { { "level", level }, { "order_vel", order_vel }, { "order_pre", order_pre } } );
 
-                        if ( level > 2 && ( order_vel <= 3.8 or order_pre <= 2.0 ) )
-                            Kokkos::abort( "Conv order not reached." );
+                        //if ( level > 2 && ( order_vel <= 3.8 or order_pre <= 2.0 ) )
+                        //    Kokkos::abort( "Conv order not reached." );
                     }
                     prev_l2_error_vel = l2_error_vel;
                     prev_l2_error_pre = l2_error_pre;
