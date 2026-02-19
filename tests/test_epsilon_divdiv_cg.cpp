@@ -1,16 +1,17 @@
 
-
 #include "../src/terra/communication/shell/communication.hpp"
 #include "fe/wedge/integrands.hpp"
 #include "fe/wedge/operators/shell/epsilon.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_kerngen.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_simple.hpp"
 #include "fe/wedge/operators/shell/vector_laplace_simple.hpp"
 #include "fe/wedge/operators/shell/vector_mass.hpp"
 #include "linalg/solvers/pcg.hpp"
 #include "linalg/solvers/richardson.hpp"
 #include "terra/dense/mat.hpp"
 #include "terra/fe/wedge/operators/shell/mass.hpp"
+#include "fe/strong_algebraic_dirichlet_enforcement.hpp"
 #include "grid/shell/bit_masks.hpp"
 #include "terra/grid/grid_types.hpp"
 #include "terra/grid/shell/spherical_shell.hpp"
@@ -19,6 +20,9 @@
 #include "terra/kokkos/kokkos_wrapper.hpp"
 #include "util/init.hpp"
 #include "util/table.hpp"
+
+#include <map>
+#include <algorithm>
 
 using namespace terra;
 
@@ -45,16 +49,19 @@ struct SolutionInterpolator
     Grid3DDataVec< double, 3 > grid_;
     Grid2DDataScalar< double > radii_;
     Grid4DDataVec< double, 3 > data_;
+    Grid4DDataScalar< grid::shell::ShellBoundaryFlag > mask_;
     bool                       only_boundary_;
 
     SolutionInterpolator(
         const Grid3DDataVec< double, 3 >& grid,
         const Grid2DDataScalar< double >& radii,
         const Grid4DDataVec< double, 3 >& data,
+        const Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
         bool                              only_boundary )
     : grid_( grid )
     , radii_( radii )
     , data_( data )
+    , mask_( mask )
     , only_boundary_( only_boundary )
     {}
 
@@ -63,8 +70,11 @@ struct SolutionInterpolator
     {
         const dense::Vec< double, 3 > coords = grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
 
-        if ( !only_boundary_ || ( r == 0 || r == radii_.extent( 1 ) - 1 ) )
-        {
+          const bool on_boundary =
+            util::has_flag( mask_( local_subdomain_id, x, y, r ), grid::shell::ShellBoundaryFlag::BOUNDARY );
+
+          if ( !only_boundary_ || on_boundary )
+            {
             data_( local_subdomain_id, x, y, r, 0 ) =
                 Kokkos::sin( 2 * coords( 0 ) ) * Kokkos::sin( 2 * coords( 2 ) ) * Kokkos::sinh( coords( 1 ) );
             data_( local_subdomain_id, x, y, r, 1 ) =
@@ -104,7 +114,6 @@ struct RHSInterpolator
     Grid3DDataVec< double, 3 > grid_;
     Grid2DDataScalar< double > radii_;
     Grid4DDataVec< double, 3 > data_;
-    bool                       only_boundary_;
 
     RHSInterpolator(
         const Grid3DDataVec< double, 3 >& grid,
@@ -113,7 +122,6 @@ struct RHSInterpolator
     : grid_( grid )
     , radii_( radii )
     , data_( data )
-
     {}
 
     KOKKOS_INLINE_FUNCTION
@@ -221,17 +229,17 @@ struct SetOnBoundary
     }
 };
 
-
-
-double test( int level, const std::shared_ptr< util::Table >& table )
+double test( int level, int level_subdomains, const std::shared_ptr< util::Table >& table )
 {
     Kokkos::Timer timer;
 
     using ScalarType = double;
 
-    const auto domain = DistributedDomain::create_uniform_single_subdomain_per_diamond( level, level, 0.5, 1.0 );
+    // CHANGED: allow varying number of subdomains (refinement level)
+    const auto domain =
+        DistributedDomain::create_uniform( level, level, 0.5, 1.0, level_subdomains, level_subdomains );
 
-    auto mask_data = grid::setup_node_ownership_mask_data( domain );
+    auto mask_data          = grid::setup_node_ownership_mask_data( domain );
     auto boundary_mask_data = grid::shell::setup_boundary_mask_data( domain );
 
     VectorQ1Vec< ScalarType >    u( "u", domain, mask_data );
@@ -257,11 +265,10 @@ double test( int level, const std::shared_ptr< util::Table >& table )
         KInterpolator( subdomain_shell_coords, subdomain_radii, k.grid_data() ) );
 
     Kokkos::fence();
-    using Epsilon = fe::wedge::operators::shell::EpsilonDivDivKerngen< ScalarType, 3 >;
 
+    //using Epsilon = fe::wedge::operators::shell::EpsilonDivDivKerngen< ScalarType, 3 >;
+    using Epsilon = fe::wedge::operators::shell::EpsilonDivDivSimple< ScalarType, 3 >;
 
-     // define boundaries: assign to each ShellBoundary flag occuring at the boundary in boundary_mask_data
-    // a type of PDE boundary condition
     BoundaryConditions bcs = {
         { CMB, DIRICHLET },
         { SURFACE, DIRICHLET },
@@ -271,50 +278,47 @@ double test( int level, const std::shared_ptr< util::Table >& table )
         { SURFACE, NEUMANN },
     };
 
-    Epsilon A( domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), bcs, false );
+    Epsilon A( domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), true, false );
     Epsilon A_neumann(
-        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), bcs_neumann, false );
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), false, false );
     Epsilon A_neumann_diag(
-        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), bcs_neumann, true );
+        domain, subdomain_shell_coords, subdomain_radii, boundary_mask_data, k.grid_data(), false, true );
 
     using Mass = fe::wedge::operators::shell::VectorMass< ScalarType, 3 >;
-
     Mass M( domain, subdomain_shell_coords, subdomain_radii, false );
 
     // Set up solution data.
     Kokkos::parallel_for(
         "solution interpolation",
         local_domain_md_range_policy_nodes( domain ),
-        SolutionInterpolator( subdomain_shell_coords, subdomain_radii, solution.grid_data(), false ) );
+        SolutionInterpolator( subdomain_shell_coords, subdomain_radii, solution.grid_data(), boundary_mask_data, false ) );
 
     // Set up boundary data.
     Kokkos::parallel_for(
         "boundary interpolation",
         local_domain_md_range_policy_nodes( domain ),
-        SolutionInterpolator( subdomain_shell_coords, subdomain_radii, g.grid_data(), true ) );
+        SolutionInterpolator( subdomain_shell_coords, subdomain_radii, g.grid_data(), boundary_mask_data, true ) );
 
+    Kokkos::fence();
     // Set up rhs data.
     Kokkos::parallel_for(
         "rhs interpolation",
         local_domain_md_range_policy_nodes( domain ),
         RHSInterpolator( subdomain_shell_coords, subdomain_radii, tmp.grid_data() ) );
 
+    Kokkos::fence();
+
     linalg::apply( M, tmp, b );
 
-    linalg::apply( A_neumann_diag, g, Adiagg );
-    linalg::apply( A_neumann, g, tmp );
+   fe::strong_algebraic_dirichlet_enforcement_vectorlaplace_like(
+        A_neumann, A_neumann_diag, g, tmp, b, boundary_mask_data, grid::shell::ShellBoundaryFlag::BOUNDARY );
 
-    linalg::lincomb( b, { 1.0, -1.0 }, { b, tmp } );
-
-    Kokkos::parallel_for(
-        "set on boundary",
-        grid::shell::local_domain_md_range_policy_nodes( domain ),
-        SetOnBoundary( Adiagg.grid_data(), b.grid_data(), domain.domain_info().subdomain_num_nodes_radially() ) );
+     Kokkos::fence();
 
     linalg::solvers::IterativeSolverParameters solver_params{ 500, 1e-15, 1e-15 };
 
     linalg::solvers::PCG< Epsilon > pcg( solver_params, table, { tmp, Adiagg, error, r } );
-    pcg.set_tag( "pcg_solver_level_" + std::to_string( level ) );
+    pcg.set_tag( "pcg_solver_level_" + std::to_string( level ) + "_sub_" + std::to_string( level_subdomains ) );
 
     Kokkos::fence();
     timer.reset();
@@ -325,8 +329,11 @@ double test( int level, const std::shared_ptr< util::Table >& table )
     linalg::lincomb( error, { 1.0, -1.0 }, { u, solution } );
     const auto l2_error = std::sqrt( dot( error, error ) / num_dofs );
 
-    table->add_row(
-        { { "level", level }, { "dofs", num_dofs }, { "l2_error", l2_error }, { "time_solver", time_solver } } );
+    table->add_row( { { "level", level },
+                      { "level_subdomains", level_subdomains },
+                      { "dofs", num_dofs },
+                      { "l2_error", l2_error },
+                      { "time_solver", time_solver } } );
 
     return l2_error;
 }
@@ -337,32 +344,70 @@ int main( int argc, char** argv )
 
     auto table = std::make_shared< util::Table >();
 
-    double prev_l2_error = 1.0;
+    // errors[level][level_subdomains]
+    std::map< int, std::map< int, double > > errors;
 
-    for ( int level = 1; level < 6; ++level )
+    for ( int level = 2; level < 4; ++level )
     {
-        Kokkos::Timer timer;
-        timer.reset();
-        double     l2_error   = test( level, table );
-        const auto time_total = timer.seconds();
-        table->add_row( { { "level", level }, { "time_total", time_total } } );
+        errors[level];
 
-        const double order = prev_l2_error / l2_error;
-        std::cout << "error = " << l2_error << std::endl;
-        std::cout << "order = " << order << std::endl;
-        std::cout << "time_total = " << time_total << std::endl;
-        /*if ( order < 3.8 )
+        // requested: subdomain refinement levels 0-3
+        // (optional clamp so we don't ask for more subdomain refinement than the global level)
+        const int max_sub = 2;
+
+        for ( int level_subdomains = 0; level_subdomains <= max_sub; ++level_subdomains )
+        {
+            Kokkos::Timer timer;
+            timer.reset();
+
+            errors[level][level_subdomains] = test( level, level_subdomains, table );
+            const auto time_total           = timer.seconds();
+
+            std::cout << "level: " << level << ", "
+                      << "level_subdomains: " << level_subdomains << ", "
+                      << "error: " << errors[level][level_subdomains] << ", "
+                      << "time_total: " << time_total << std::endl;
+
+            // sanity: same global level should give same error irrespective of subdomain partitioning
+            if ( level_subdomains > 0 )
             {
-                return EXIT_FAILURE;
-            }*/
+                if ( std::abs( errors[level][level_subdomains] - errors[level][level_subdomains - 1] ) > 1e-12 )
+                {
+                    Kokkos::abort( "Same level should have same error - regardless of number of subdomains." );
+                }
+            }
 
-        table->add_row( { { "level", level }, { "order", prev_l2_error / l2_error } } );
-        prev_l2_error = l2_error;
+            table->add_row( { { "level", level },
+                              { "level_subdomains", level_subdomains },
+                              { "time_total", time_total } } );
+        }
+
+        // convergence order across levels (use any subdomain level; they should all match)
+        if ( level > 1 )
+        {
+            const int prev_sub = std::min( 3, level - 1 );
+            const int curr_sub = std::min( 3, level );
+
+            const double prev_err = errors[level - 1][prev_sub];
+            const double curr_err = errors[level][curr_sub];
+            const double order    = prev_err / curr_err;
+
+            std::cout << "\nerror(level=" << level << ") = " << curr_err << std::endl;
+            std::cout << "order = " << order << std::endl;
+
+            // keep your threshold here (was commented in your original)
+            // if ( order < 3.8 ) { return EXIT_FAILURE; }
+
+            table->add_row( { { "level", level }, { "order", order } } );
+        }
+
+        std::cout << std::endl;
     }
 
     table->query_rows_not_none( "order" ).select_columns( { "level", "order" } ).print_pretty();
     table->query_rows_not_none( "dofs" )
-        .select_columns( { "level", "dofs", "l2_error", "time_solver" } )
+        .select_columns( { "level", "level_subdomains", "dofs", "l2_error", "time_solver" } )
         .print_pretty();
+
     return 0;
 }

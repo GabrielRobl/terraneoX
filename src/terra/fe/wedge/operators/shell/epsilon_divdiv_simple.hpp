@@ -20,21 +20,19 @@ class EpsilonDivDivSimple
     using SrcVectorType           = linalg::VectorQ1Vec< ScalarT, VecDim >;
     using DstVectorType           = linalg::VectorQ1Vec< ScalarT, VecDim >;
     using ScalarType              = ScalarT;
-    using Grid4DDataLocalMatrices = terra::grid::Grid4DDataMatrices< ScalarType, 18, 18, 2 >;
 
   private:
     bool storeLMatrices_ =
         false; // set to let apply_impl() know, that it should store the local matrices after assembling them
-    bool applyStoredLMatrices_ =
-        false; // set to make apply_impl() load and use the stored LMatrices for the operator application
-    Grid4DDataLocalMatrices lmatrices_;
-    bool                    single_quadpoint_ = true;
+    bool                    single_quadpoint_ = false;
 
     grid::shell::DistributedDomain domain_;
 
     grid::Grid3DDataVec< ScalarT, 3 >    grid_;
     grid::Grid2DDataScalar< ScalarT >    radii_;
     grid::Grid4DDataScalar< ScalarType > k_;
+    grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag > mask_;
+
 
     bool treat_boundary_;
     bool diagonal_;
@@ -53,6 +51,7 @@ class EpsilonDivDivSimple
         const grid::shell::DistributedDomain&    domain,
         const grid::Grid3DDataVec< ScalarT, 3 >  grid,
         const grid::Grid2DDataScalar< ScalarT >  radii,
+        const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& mask,
         const grid::Grid4DDataScalar< ScalarT >  k,
         bool                                     treat_boundary,
         bool                                     diagonal,
@@ -61,7 +60,7 @@ class EpsilonDivDivSimple
             linalg::OperatorCommunicationMode::CommunicateAdditively )
     : domain_( domain )
     , grid_( grid )
-    , radii_( radii )
+    , radii_( radii ) , mask_( mask )
     , k_( k )
     , treat_boundary_( treat_boundary )
     , diagonal_( diagonal )
@@ -83,81 +82,12 @@ class EpsilonDivDivSimple
     /// @brief Getter for grid member
     grid::Grid3DDataVec< ScalarT, 3 > get_grid() const { return grid_; }
 
-    /// @brief Retrives the local matrix stored in the operator
-    KOKKOS_INLINE_FUNCTION
-    dense::Mat< ScalarT, 6, 6 > get_lmatrix(
-        const int local_subdomain_id,
-        const int x_cell,
-        const int y_cell,
-        const int r_cell,
-        const int wedge,
-        const int dimi,
-        const int dimj ) const
-    {
-        assert( lmatrices_.data() != nullptr );
-        dense::Mat< ScalarT, 6, 6 > ijslice;
-        for ( int i = 0; i < 6; ++i )
-        {
-            for ( int j = 0; j < 6; ++j )
-            {
-                ijslice( i, j ) =
-                    lmatrices_( local_subdomain_id, x_cell, y_cell, r_cell, wedge )( i + dimi * 6, j + dimj * 6 );
-            }
-        }
-        return ijslice;
-    }
-
-    /// @brief Set the local matrix stored in the operator
-    KOKKOS_INLINE_FUNCTION
-    void set_lmatrix(
-        const int                   local_subdomain_id,
-        const int                   x_cell,
-        const int                   y_cell,
-        const int                   r_cell,
-        const int                   wedge,
-        const int                   dimi,
-        const int                   dimj,
-        dense::Mat< ScalarT, 6, 6 > mat ) const
-    {
-        assert( lmatrices_.data() != nullptr );
-        for ( int i = 0; i < 6; ++i )
-        {
-            for ( int j = 0; j < 6; ++j )
-            {
-                lmatrices_( local_subdomain_id, x_cell, y_cell, r_cell, wedge )( i + dimi * 6, j + dimj * 6 ) =
-                    mat( i, j );
-            }
-        }
-    }
-
-    /// @brief Setter/Getter for app applyStoredLMatrices_: usage of stored local matrices during apply
-    void setApplyStoredLMatrices( bool v ) { applyStoredLMatrices_ = v; }
+   
 
     /// @brief S/Getter for diagonal member
     void set_diagonal( bool v ) { diagonal_ = v; }
 
-    /// @brief
-    /// allocates memory for the local matrices
-    /// calls kernel with storeLMatrices_ = true to assemble and store the local matrices
-    /// sets applyStoredLMatrices_, such that future applies use the stored local matrices
-    void store_lmatrices()
-    {
-        storeLMatrices_ = true;
-        if ( lmatrices_.data() == nullptr )
-        {
-            lmatrices_ = Grid4DDataLocalMatrices(
-                "LaplaceSimple::lmatrices_",
-                domain_.subdomains().size(),
-                domain_.domain_info().subdomain_num_nodes_per_side_laterally() - 1,
-                domain_.domain_info().subdomain_num_nodes_per_side_laterally() - 1,
-                domain_.domain_info().subdomain_num_nodes_radially() - 1 );
-            Kokkos::parallel_for(
-                "assemble_store_lmatrices", grid::shell::local_domain_md_range_policy_cells( domain_ ), *this );
-            Kokkos::fence();
-        }
-        storeLMatrices_       = false;
-        applyStoredLMatrices_ = true;
-    }
+   
 
     void set_operator_apply_and_communication_modes(
         const linalg::OperatorApplyMode         operator_apply_mode,
@@ -170,8 +100,6 @@ class EpsilonDivDivSimple
     void apply_impl( const SrcVectorType& src, DstVectorType& dst )
     {
         util::Timer timer_apply( "vector_laplace_apply" );
-        if ( storeLMatrices_ or applyStoredLMatrices_ )
-            assert( lmatrices_.data() != nullptr );
 
         if ( operator_apply_mode_ == linalg::OperatorApplyMode::Replace )
         {
@@ -213,8 +141,7 @@ class EpsilonDivDivSimple
         // Compute the local element matrix.
         dense::Mat< ScalarT, 18, 18 > A[num_wedges_per_hex_cell] = {};
 
-        if ( !applyStoredLMatrices_ )
-        {
+     
             // Gather surface points for each wedge.
             dense::Vec< ScalarT, 3 > wedge_phy_surf[num_wedges_per_hex_cell][num_nodes_per_wedge_surface] = {};
             wedge_surface_physical_coords( wedge_phy_surf, grid_, local_subdomain_id, x_cell, y_cell );
@@ -289,18 +216,25 @@ class EpsilonDivDivSimple
                 }
             }
 
+
             if ( treat_boundary_ )
             {
+                 const bool at_bot_boundary =
+            util::has_flag( mask_( local_subdomain_id, x_cell, y_cell, r_cell ), grid::shell::ShellBoundaryFlag::CMB );
+        const bool at_top_boundary = util::has_flag(
+            mask_( local_subdomain_id, x_cell, y_cell, r_cell + 1 ), grid::shell::ShellBoundaryFlag::SURFACE );
+              for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
+                        {
+                dense::Mat< ScalarT, 18, 18 > boundary_mask;
+                            boundary_mask.fill( 1.0 );
+
                 for ( int dimi = 0; dimi < 3; ++dimi )
                 {
                     for ( int dimj = 0; dimj < 3; ++dimj )
                     {
-                        for ( int wedge = 0; wedge < num_wedges_per_hex_cell; wedge++ )
-                        {
-                            dense::Mat< ScalarT, 18, 18 > boundary_mask;
-                            boundary_mask.fill( 1.0 );
-
-                            if ( r_cell == 0 )
+                        
+                         
+                            if ( at_bot_boundary )
                             {
                                 // Inner boundary (CMB).
                                 for ( int i = 0; i < 6; i++ )
@@ -317,7 +251,7 @@ class EpsilonDivDivSimple
                                 }
                             }
 
-                            if ( r_cell + 1 == radii_.extent( 1 ) - 1 )
+                            if ( at_top_boundary )
                             {
                                 // Outer boundary (surface).
                                 for ( int i = 0; i < 6; i++ )
@@ -333,19 +267,14 @@ class EpsilonDivDivSimple
                                     }
                                 }
                             }
-
-                            A[wedge].hadamard_product( boundary_mask );
                         }
                     }
+                
+
+                            A[wedge].hadamard_product( boundary_mask );
                 }
             }
-        }
-        else
-        {
-            // load LMatrix for both local wedges
-            A[0] = lmatrices_( local_subdomain_id, x_cell, y_cell, r_cell, 0 );
-            A[1] = lmatrices_( local_subdomain_id, x_cell, y_cell, r_cell, 1 );
-        }
+       
 
         if ( diagonal_ )
         {
@@ -353,14 +282,7 @@ class EpsilonDivDivSimple
             A[1] = A[1].diagonal();
         }
 
-        if ( storeLMatrices_ )
-        {
-            // write local matrices to mem
-            lmatrices_( local_subdomain_id, x_cell, y_cell, r_cell, 0 ) = A[0];
-            lmatrices_( local_subdomain_id, x_cell, y_cell, r_cell, 1 ) = A[1];
-        }
-        else
-        {
+       
             dense::Vec< ScalarT, 18 > src[num_wedges_per_hex_cell];
             for ( int dimj = 0; dimj < 3; dimj++ )
             {
@@ -393,7 +315,7 @@ class EpsilonDivDivSimple
                 atomically_add_local_wedge_vector_coefficients(
                     dst_, local_subdomain_id, x_cell, y_cell, r_cell, dimi, dst_d );
             }
-        }
+        
     }
 };
 
