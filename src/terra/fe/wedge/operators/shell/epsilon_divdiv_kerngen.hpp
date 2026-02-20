@@ -55,36 +55,17 @@ class EpsilonDivDivKerngen
     linalg::OperatorCommunicationMode operator_communication_mode_;
     linalg::OperatorStoredMatrixMode  operator_stored_matrix_mode_;
 
-    //communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarT, VecDim > send_buffers_;
     communication::shell::SubdomainNeighborhoodSendRecvBuffer< ScalarT, VecDim > recv_buffers_;
     terra::communication::shell::ShellBoundaryCommPlan<grid::Grid4DDataVec< ScalarType, VecDim >> comm_plan_; // builds once
 
-
-    grid::Grid4DDataVec< ScalarType, VecDim > dst_;
     grid::Grid4DDataVec< ScalarType, VecDim > src_;
+    grid::Grid4DDataVec< ScalarType, VecDim > dst_;
 
     // Quadrature points.
     const int num_quad_points = quadrature::quad_felippa_1x1_num_quad_points;
 
     dense::Vec< ScalarT, 3 > quad_points[quadrature::quad_felippa_1x1_num_quad_points];
     ScalarT                  quad_weights[quadrature::quad_felippa_1x1_num_quad_points];
-
-     int local_subdomains_;
-    int hex_lat_;
-    int hex_rad_;
-    int lat_refinement_level_;
-
-    // --- NEW: 3D tiling parameters ---
-     int lat_tile_;    // slab size in x and y (same)
-  int r_tile_;      // slab size in r (team's r dimension)
-  int lat_tiles_;   // number of tiles per lateral dimension (x AND y)
-  int r_tiles_;     // number of tiles in r
-
-  int team_size_;   // = lat_tile_*lat_tile_*r_tile_
-  int blocks_;      // league size = local_subdomains_ * lat_tiles_^2 * r_tiles_
-
-    ScalarT r_max_;
-    ScalarT r_min_;
 
     int local_subdomains_;
     int hex_lat_;
@@ -103,7 +84,6 @@ class EpsilonDivDivKerngen
         const grid::Grid4DDataScalar< ScalarT >&                        k,
         BoundaryConditions                                              bcs,
         bool                                                            diagonal,
-        bool                                                            diagonal,
         linalg::OperatorApplyMode         operator_apply_mode = linalg::OperatorApplyMode::Replace,
         linalg::OperatorCommunicationMode operator_communication_mode =
             linalg::OperatorCommunicationMode::CommunicateAdditively,
@@ -117,40 +97,13 @@ class EpsilonDivDivKerngen
     , operator_apply_mode_( operator_apply_mode )
     , operator_communication_mode_( operator_communication_mode )
     , operator_stored_matrix_mode_( operator_stored_matrix_mode )
-    //, send_buffers_( domain )
     , recv_buffers_( domain )
     , comm_plan_(domain)
     {
-             bcs_[0] = bcs[0];
+        bcs_[0] = bcs[0];
         bcs_[1] = bcs[1];
         quadrature::quad_felippa_1x1_quad_points( quad_points );
         quadrature::quad_felippa_1x1_quad_weights( quad_weights );
-
-        const grid::shell::DomainInfo& domain_info = domain_.domain_info();
-        local_subdomains_                          = domain_.subdomains().size();
-        hex_lat_                                   = domain_info.subdomain_num_nodes_per_side_laterally() - 1;
-        hex_rad_                                   = domain_info.subdomain_num_nodes_radially() - 1;
-        lat_refinement_level_                      = domain_info.diamond_lateral_refinement_level();
-
-        // ---- choose tiles (tune) ----
-        // must keep team_size_ reasonable for backend (GPU often <= 1024)
-        lat_tile_ = 4;   // x=y slab size
-    r_tile_   = 8;   // r slab size
-
-    lat_tiles_ = (hex_lat_ + lat_tile_ - 1) / lat_tile_;
-    r_tiles_   = (hex_rad_ + r_tile_  - 1) / r_tile_;
-
-    team_size_ = lat_tile_ * lat_tile_ * r_tile_;
-    blocks_    = local_subdomains_ * lat_tiles_ * lat_tiles_ * r_tiles_;
-
-        r_min_ = domain_info.radii()[0];
-        r_max_ = domain_info.radii()[domain_info.radii().size() - 1];
-
-        util::logroot << "[EpsilonDivDiv] tile size (x,y,r)=(" << lat_tile_ << "," << lat_tile_ << "," << r_tile_
-                      << ")" << std::endl;
-        util::logroot << "[EpsilonDivDiv] number of tiles (x,y,r)=(" << lat_tiles_ << "," << lat_tiles_ << "," << r_tiles_
-                      << "), team_size=" << team_size_ << ", blocks=" << blocks_ << std::endl;
-   
         const grid::shell::DomainInfo& domain_info = domain_.domain_info();
         local_subdomains_                          = domain_.subdomains().size();
         hex_lat_                                   = domain_info.subdomain_num_nodes_per_side_laterally() - 1;
@@ -266,14 +219,8 @@ class EpsilonDivDivKerngen
             assign( dst, 0 );
         }
 
-        dst_ = dst.grid_data();
         src_ = src.grid_data();
-
-        util::Timer          timer_kernel( "epsilon_divdiv_kernel" );
-        Kokkos::TeamPolicy<> policy( blocks_, team_size_ );
-        Kokkos::parallel_for( "matvec", policy, *this );
-        //   grid::shell::local_domain_md_range_policy_cells( domain_ ),
-        //s   *this );
+        dst_ = dst.grid_data();
 
         if ( src_.extent( 0 ) != dst_.extent( 0 ) || src_.extent( 1 ) != dst_.extent( 1 ) ||
              src_.extent( 2 ) != dst_.extent( 2 ) || src_.extent( 3 ) != dst_.extent( 3 ) )
@@ -298,10 +245,7 @@ class EpsilonDivDivKerngen
         {
             util::Timer timer_comm( "epsilon_divdiv_comm" );
 
-            terra::communication::shell::send_recv_with_plan(comm_plan_, dst_, recv_buffers_);
-            //communication::shell::pack_send_and_recv_local_subdomain_boundaries(
-            //    domain_, dst_, send_buffers_, recv_buffers_ );
-            //communication::shell::unpack_and_reduce_local_subdomain_boundaries( domain_, dst_, recv_buffers_ );
+            terra::communication::shell::send_recv_with_plan(comm_plan_, dst_, recv_buffers_);    
         }
     }
 
@@ -390,24 +334,19 @@ class EpsilonDivDivKerngen
         const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
 
         
-        if ( operator_stored_matrix_mode_ != linalg::OperatorStoredMatrixMode::Off || at_cmb || at_surface )
+        if ( operator_stored_matrix_mode_ != linalg::OperatorStoredMatrixMode::Off)// || at_cmb || at_surface )
         {
-            if ( r_cell >= hex_rad_ )
-            {
-                Kokkos::abort( "This should not happen." );
-            }
+           
 
             dense::Mat< ScalarT, LocalMatrixDim, LocalMatrixDim > A[num_wedges_per_hex_cell] = { 0 };
 
             if ( operator_stored_matrix_mode_ == linalg::OperatorStoredMatrixMode::Full )
             {
-                Kokkos::abort( "This should not happen." );
                 A[0] = local_matrix_storage_.get_matrix( local_subdomain_id, x_cell, y_cell, r_cell, 0 );
                 A[1] = local_matrix_storage_.get_matrix( local_subdomain_id, x_cell, y_cell, r_cell, 1 );
             }
             else if ( operator_stored_matrix_mode_ == linalg::OperatorStoredMatrixMode::Selective )
             {
-                Kokkos::abort( "This should not happen." );
                 if ( local_matrix_storage_.has_matrix( local_subdomain_id, x_cell, y_cell, r_cell, 0 ) &&
                      local_matrix_storage_.has_matrix( local_subdomain_id, x_cell, y_cell, r_cell, 1 ) )
                 {
@@ -908,49 +847,6 @@ class EpsilonDivDivKerngen
                             const double gy = dN_ref[node_idx][1];
                             const double gz = dN_ref[node_idx][2];
 
-                        const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                        const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                        const double g2 = i20 * gx + i21 * gy + i22 * gz;
-
-                        double E00, E11, E22, sym01, sym02, sym12, gdd;
-                        column_grad_to_sym( dim_diagBC, g0, g1, g2, E00, E11, E22, sym01, sym02, sym12, gdd );
-
-                        const int ddx = WEDGE_NODE_OFF[w][node_idx][0];
-                        const int ddy = WEDGE_NODE_OFF[w][node_idx][1];
-                        const int ddr = WEDGE_NODE_OFF[w][node_idx][2];
-
-                        const int nid = node_id( tx + ddx, ty + ddy );
-                        const int lvl = lvl0 + ddr;
-
-                        const double s = src_sh( nid, dim_diagBC, lvl );
-
-                        const double pairing0 = 4.0 * s;
-                        const double pairing1 = 2.0 * s;
-
-                        const int u = WEDGE_TO_UNIQUE[w][node_idx];
-
-                        dst8[dim_diagBC][u] +=
-                            kwJ * ( pairing0 * ( sym01 * sym01 ) + pairing0 * ( sym02 * sym02 ) +
-                                    pairing0 * ( sym12 * sym12 ) + pairing1 * ( E00 * E00 ) + pairing1 * ( E11 * E11 ) +
-                                    pairing1 * ( E22 * E22 ) + NEG_TWO_THIRDS * ( gdd * gdd ) * s );
-                    }
-                }
-            }
-        } // w
-
-        // scatter
-        for ( int dim_add = 0; dim_add < 3; ++dim_add )
-        {
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell, y_cell, r_cell, dim_add ), dst8[dim_add][0] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell + 1, y_cell, r_cell, dim_add ), dst8[dim_add][1] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell, y_cell + 1, r_cell, dim_add ), dst8[dim_add][2] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell, y_cell, r_cell + 1, dim_add ), dst8[dim_add][3] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell + 1, y_cell, r_cell + 1, dim_add ), dst8[dim_add][4] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell, y_cell + 1, r_cell + 1, dim_add ), dst8[dim_add][5] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell + 1, y_cell + 1, r_cell, dim_add ), dst8[dim_add][6] );
-            Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell + 1, y_cell + 1, r_cell + 1, dim_add ), dst8[dim_add][7] );
-        }
-    }
                             const double g0 = i00 * gx + i01 * gy + i02 * gz;
                             const double g1 = i10 * gx + i11 * gy + i12 * gz;
                             const double g2 = i20 * gx + i21 * gy + i22 * gz;
