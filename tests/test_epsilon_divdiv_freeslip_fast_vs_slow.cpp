@@ -81,7 +81,7 @@ struct ScalarCoeffInterpolator
 };
 
 template < typename ScalarT >
-void compare_epsilon_divdiv_freeslip_cmb_dirichlet_surface( int level, bool diagonal )
+void compare_epsilon_divdiv_freeslip_cmb_dirichlet_surface( int level, bool diagonal, int repeats = 5 )
 {
     using Op = fe::wedge::operators::shell::EpsilonDivDivKerngen< ScalarT >;
 
@@ -147,36 +147,67 @@ void compare_epsilon_divdiv_freeslip_cmb_dirichlet_surface( int level, bool diag
         linalg::OperatorCommunicationMode::CommunicateAdditively,
         linalg::OperatorStoredMatrixMode::Off );
 
-    op_slow.set_stored_matrix_mode( linalg::OperatorStoredMatrixMode::Selective, /*level_range=*/0, gca_elements.grid_data() );
+    op_slow.set_stored_matrix_mode(
+        linalg::OperatorStoredMatrixMode::Selective, /*level_range=*/0, gca_elements.grid_data() );
 
+    // Warmup (avoid first-call effects in timing)
     linalg::apply( op_fast, src, dst_fast );
     linalg::apply( op_slow, src, dst_slow );
+    Kokkos::fence();
 
+    // Timed fast path
+    Kokkos::Timer timer_fast;
+    for ( int i = 0; i < repeats; ++i )
+    {
+        linalg::apply( op_fast, src, dst_fast );
+    }
+    Kokkos::fence();
+    const double t_fast = timer_fast.seconds();
+
+    // Timed slow path
+    Kokkos::Timer timer_slow;
+    for ( int i = 0; i < repeats; ++i )
+    {
+        linalg::apply( op_slow, src, dst_slow );
+    }
+    Kokkos::fence();
+    const double t_slow = timer_slow.seconds();
+
+    // Correctness check (last results)
     linalg::lincomb( err, { 1.0, -1.0 }, { dst_fast, dst_slow } );
 
     const auto num_dofs = kernels::common::count_masked< long >( mask_data, grid::NodeOwnershipFlag::OWNED );
     const auto l2_err   = std::sqrt( dot( err, err ) / num_dofs );
     const auto inf_err  = linalg::norm_inf( err );
 
-    std::cout << "  L2 error  = " << l2_err << std::endl;
-    std::cout << "  inf error = " << inf_err << std::endl;
+    std::cout << "  repeats    = " << repeats << std::endl;
+    std::cout << "  fast time  = " << t_fast << " s  (" << ( t_fast / repeats ) << " s/apply)" << std::endl;
+    std::cout << "  slow time  = " << t_slow << " s  (" << ( t_slow / repeats ) << " s/apply)" << std::endl;
+    if ( t_fast > 0.0 )
+    {
+        std::cout << "  slow/fast  = " << ( t_slow / t_fast ) << "x" << std::endl;
+    }
+    std::cout << "  L2 error   = " << l2_err << std::endl;
+    std::cout << "  inf error  = " << inf_err << std::endl;
 }
 
 int main( int argc, char** argv )
 {
     util::terra_initialize( &argc, &argv );
 
-    for ( auto diagonal : { true, false } )
+    constexpr int repeats = 5;
+
+    for ( auto diagonal : { false } )
     {
         std::cout << "==================================================" << std::endl;
         std::cout << "EpsilonDivDivKerngen fast_freeslip vs slow" << std::endl;
         std::cout << "BCs: CMB=FREESLIP, SURFACE=DIRICHLET" << std::endl;
         std::cout << "diagonal = " << diagonal << std::endl;
 
-        for ( int level = 0; level < 6; ++level )
+        for ( int level = 0; level < 9; ++level )
         {
             std::cout << "level = " << level << std::endl;
-            compare_epsilon_divdiv_freeslip_cmb_dirichlet_surface< double >( level, diagonal );
+            compare_epsilon_divdiv_freeslip_cmb_dirichlet_surface< double >( level, diagonal, repeats );
         }
     }
 
