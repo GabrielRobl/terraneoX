@@ -197,7 +197,7 @@ BenchmarkData
     linalg::randomize( src_stokes_double );
     linalg::randomize( src_stokes_float );
     BoundaryConditions bcs = {
-        { CMB, FREESLIP },
+        { CMB, DIRICHLET },
         { SURFACE, DIRICHLET },
     };
     double duration = 0.0;
