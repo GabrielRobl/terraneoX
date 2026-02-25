@@ -933,6 +933,9 @@ class EpsilonDivDivKerngen
         const int n10 = node_id( tx + 1, ty );
         const int n11 = node_id( tx + 1, ty + 1 );
 
+        // Accumulate contributions from both wedges, scatter once after the loop.
+        double dst_hex[3][8] = { 0.0 };
+
         for ( int w = 0; w < 2; ++w )
         {
             const int v0 = w == 0 ? n00 : n11;
@@ -995,9 +998,6 @@ class EpsilonDivDivKerngen
 
             const double kwJ = k_eval * wJ;
 
-            // Per-wedge output accumulator (scatter after each wedge to reduce register pressure)
-            double dst_w[3][6] = { 0.0 };
-
             double gu00 = 0.0;
             double gu10 = 0.0, gu11 = 0.0;
             double gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
@@ -1048,11 +1048,12 @@ class EpsilonDivDivKerngen
                     const double g1 = i10 * gx + i11 * gy + i12 * gz;
                     const double g2 = i20 * gx + i21 * gy + i22 * gz;
 
-                    dst_w[0][n] +=
+                    const int uid = WEDGE_TO_UNIQUE[w][n];
+                    dst_hex[0][uid] +=
                         kwJ * ( 2.0 * ( g0 * gu00 + g1 * gu10 + g2 * gu20 ) + NEG_TWO_THIRDS * g0 * div_u );
-                    dst_w[1][n] +=
+                    dst_hex[1][uid] +=
                         kwJ * ( 2.0 * ( g0 * gu10 + g1 * gu11 + g2 * gu21 ) + NEG_TWO_THIRDS * g1 * div_u );
-                    dst_w[2][n] +=
+                    dst_hex[2][uid] +=
                         kwJ * ( 2.0 * ( g0 * gu20 + g1 * gu21 + g2 * gu22 ) + NEG_TWO_THIRDS * g2 * div_u );
                 }
             }
@@ -1080,27 +1081,34 @@ class EpsilonDivDivKerngen
                     const double s0 = src_sh( nid, 0, lvl );
                     const double s1 = src_sh( nid, 1, lvl );
                     const double s2 = src_sh( nid, 2, lvl );
-                    dst_w[0][n] += kwJ * s0 * ( gg + ONE_THIRD * g0 * g0 );
-                    dst_w[1][n] += kwJ * s1 * ( gg + ONE_THIRD * g1 * g1 );
-                    dst_w[2][n] += kwJ * s2 * ( gg + ONE_THIRD * g2 * g2 );
+                    const int uid = WEDGE_TO_UNIQUE[w][n];
+                    dst_hex[0][uid] += kwJ * s0 * ( gg + ONE_THIRD * g0 * g0 );
+                    dst_hex[1][uid] += kwJ * s1 * ( gg + ONE_THIRD * g1 * g1 );
+                    dst_hex[2][uid] += kwJ * s2 * ( gg + ONE_THIRD * g2 * g2 );
                 }
             }
 
-            // Scatter this wedge's contributions immediately
+        }
+
+        // Scatter accumulated hex-cell contributions to global memory.
+        // 8 unique nodes per hex cell (shared nodes already combined).
+        static constexpr int UNIQUE_NODE_OFF[8][3] = {
+            { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 },
+            { 1, 0, 1 }, { 0, 1, 1 }, { 1, 1, 0 }, { 1, 1, 1 }
+        };
+
 #pragma unroll
-            for ( int n = 0; n < 6; ++n )
+        for ( int n = 0; n < 8; ++n )
+        {
+            const int ddx = UNIQUE_NODE_OFF[n][0];
+            const int ddy = UNIQUE_NODE_OFF[n][1];
+            const int ddr = UNIQUE_NODE_OFF[n][2];
+            for ( int dim_add = 0; dim_add < 3; ++dim_add )
             {
-                const int ddx = WEDGE_NODE_OFF[w][n][0];
-                const int ddy = WEDGE_NODE_OFF[w][n][1];
-                const int ddr = WEDGE_NODE_OFF[w][n][2];
-                for ( int dim_add = 0; dim_add < 3; ++dim_add )
-                {
-                    Kokkos::atomic_add(
-                        &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, dim_add ),
-                        dst_w[dim_add][n] );
-                }
+                Kokkos::atomic_add(
+                    &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, dim_add ),
+                    dst_hex[dim_add][n] );
             }
-
         }
     }
 
