@@ -273,7 +273,7 @@ BenchmarkData
             coeff_double.grid_data(),
             bcs,
             false );
-        util::Timer t( "EpsDivDiv - double" );
+        util::Timer t( "EpsDivDivKerngen - double" );
         duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
         dofs     = dofs_vec;
     }
