@@ -15,7 +15,7 @@
 #include "linalg/vector_q1.hpp"
 #include "util/timer.hpp"
 
-namespace terra::fe::wedge::operators::shell {
+namespace terra::fe::wedge::operators::shell::epsdivdiv_history {
 
 using grid::shell::get_boundary_condition_flag;
 using grid::shell::BoundaryConditionFlag::DIRICHLET;
@@ -54,7 +54,7 @@ using terra::linalg::trafo::trafo_mat_cartesian_to_normal_tangential;
  * This avoids a runtime branch inside the hot device kernel.
  */
 template < typename ScalarT, int VecDim = 3 >
-class EpsilonDivDivKerngen
+class EpsilonDivDivKerngenV08ScalarCoalesced
 {
   public:
     using SrcVectorType                 = linalg::VectorQ1Vec< ScalarT, VecDim >;
@@ -104,8 +104,6 @@ class EpsilonDivDivKerngen
     // Team-policy tiling (one team handles a slab lat_tile x lat_tile x r_tile cells)
     int lat_tile_;
     int r_tile_;
-    int r_passes_;
-    int r_tile_block_;
     int lat_tiles_;
     int r_tiles_;
     int team_size_;
@@ -154,7 +152,7 @@ class EpsilonDivDivKerngen
     }
 
   public:
-    EpsilonDivDivKerngen(
+    EpsilonDivDivKerngenV08ScalarCoalesced(
         const grid::shell::DistributedDomain&                           domain,
         const grid::Grid3DDataVec< ScalarT, 3 >&                        grid,
         const grid::Grid2DDataScalar< ScalarT >&                        radii,
@@ -190,13 +188,11 @@ class EpsilonDivDivKerngen
         hex_rad_                                   = domain_info.subdomain_num_nodes_radially() - 1;
         lat_refinement_level_                      = domain_info.diamond_lateral_refinement_level();
 
-        lat_tile_     = 4;
-        r_tile_       = 8;
-        r_passes_     = 2;
-        r_tile_block_ = r_tile_ * r_passes_;
+        lat_tile_ = 4;
+        r_tile_   = 16;
 
         lat_tiles_ = ( hex_lat_ + lat_tile_ - 1 ) / lat_tile_;
-        r_tiles_   = ( hex_rad_ + r_tile_block_ - 1 ) / r_tile_block_;
+        r_tiles_   = ( hex_rad_ + r_tile_ - 1 ) / r_tile_;
 
         team_size_ = lat_tile_ * lat_tile_ * r_tile_;
         blocks_    = local_subdomains_ * lat_tiles_ * lat_tiles_ * r_tiles_;
@@ -207,8 +203,8 @@ class EpsilonDivDivKerngen
         // Host-side path selection (no in-kernel path branching)
         update_kernel_path_flag_host_only();
 
-        util::logroot << "[EpsilonDivDiv] tile size (x,y,r)=(" << lat_tile_ << "," << lat_tile_ << "," << r_tile_
-                      << "), r_passes=" << r_passes_ << std::endl;
+        util::logroot << "[EpsilonDivDiv] tile size (x,y,r)=(" << lat_tile_ << "," << lat_tile_ << "," << r_tile_ << ")"
+                      << std::endl;
         util::logroot << "[EpsilonDivDiv] number of tiles (x,y,r)=(" << lat_tiles_ << "," << lat_tiles_ << ","
                       << r_tiles_ << "), team_size=" << team_size_ << ", blocks=" << blocks_ << std::endl;
         const char* path_name = ( kernel_path_ == KernelPath::Slow )         ? "slow" :
@@ -353,47 +349,20 @@ class EpsilonDivDivKerngen
         }
         else if ( kernel_path_ == KernelPath::FastFreeslip )
         {
-            if ( diagonal_ )
-            {
-                Kokkos::parallel_for(
-                    "epsilon_divdiv_apply_kernel_fast_fs_diag",
-                    policy,
-                    KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                        this->template run_team_fast_freeslip< true >( team );
-                    } );
-            }
-            else
-            {
-                Kokkos::parallel_for(
-                    "epsilon_divdiv_apply_kernel_fast_fs_matvec",
-                    policy,
-                    KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                        this->template run_team_fast_freeslip< false >( team );
-                    } );
-            }
+            Kokkos::parallel_for(
+                "epsilon_divdiv_apply_kernel_fast_freeslip", policy, KOKKOS_CLASS_LAMBDA( const Team& team ) {
+                    this->run_team_fast_freeslip( team );
+                } );
         }
         else
         {
-            Kokkos::TeamPolicy< Kokkos::LaunchBounds< 128, 6 > > dn_policy( blocks_, team_size_ );
-            dn_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size_dn( team_size_ ) ) );
-            if ( diagonal_ )
-            {
-                Kokkos::parallel_for(
-                    "epsilon_divdiv_apply_kernel_fast_dn_diag",
-                    dn_policy,
-                    KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                        this->template run_team_fast_dirichlet_neumann< true >( team );
-                    } );
-            }
-            else
-            {
-                Kokkos::parallel_for(
-                    "epsilon_divdiv_apply_kernel_fast_dn_matvec",
-                    dn_policy,
-                    KOKKOS_CLASS_LAMBDA( const Team& team ) {
-                        this->template run_team_fast_dirichlet_neumann< false >( team );
-                    } );
-            }
+            // Launch bounds: 256 threads/block, min 3 blocks/SM to reduce register pressure
+            Kokkos::TeamPolicy<  > dn_policy( blocks_, team_size_ );
+            dn_policy.set_scratch_size( 0, Kokkos::PerTeam( team_shmem_size( team_size_ ) ) );
+            Kokkos::parallel_for(
+                "epsilon_divdiv_apply_kernel_fast_dirichlet_neumann",
+                dn_policy,
+                KOKKOS_CLASS_LAMBDA( const Team& team ) { this->run_team_fast_dirichlet_neumann( team ); } );
         }
 
         Kokkos::fence();
@@ -459,32 +428,17 @@ class EpsilonDivDivKerngen
      * @brief Team scratch memory size for fast paths.
      *
      * Layout per team:
-     *   [coords_sh | src_sh | k_sh | r_sh]
+     *   [coords_sh | src_sh | k_sh | r_sh | padding]
      */
     KOKKOS_INLINE_FUNCTION
     size_t team_shmem_size( const int ts ) const
     {
-        const int nlev = r_tile_block_ + 1;
+        const int nlev = r_tile_ + 1;
         const int n    = lat_tile_ + 1;
         const int nxy  = n * n;
 
-        // coords_sh(nxy,3) + normals_sh(nxy,3) + src_sh(nxy,3,nlev) + k_sh(nxy,nlev) + r_sh(nlev) + 1
         const size_t nscalars =
-            size_t( nxy ) * 3 + size_t( nxy ) * 3 + size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev + size_t( nlev ) + 1;
-
-        return sizeof( ScalarType ) * nscalars;
-    }
-
-    KOKKOS_INLINE_FUNCTION
-    size_t team_shmem_size_dn( const int /* ts */ ) const
-    {
-        const int nlev = r_tile_block_ + 1;
-        const int n    = lat_tile_ + 1;
-        const int nxy  = n * n;
-
-        // coords_sh(nxy,3) + src_sh(nxy,3,nlev) + k_sh(nxy,nlev) + r_sh(nlev)
-        const size_t nscalars =
-            size_t( nxy ) * 3 + size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev + size_t( nlev );
+            size_t( nxy ) * 3 + size_t( nxy ) * 3 * nlev + size_t( nxy ) * nlev + size_t( nlev ) + 1;
 
         return sizeof( ScalarType ) * nscalars;
     }
@@ -525,7 +479,7 @@ class EpsilonDivDivKerngen
 
         x0 = lat_x_id * lat_tile_;
         y0 = lat_y_id * lat_tile_;
-        r0 = r_tile_id * r_tile_block_;
+        r0 = r_tile_id * r_tile_;
 
         const int tid = team.team_rank();
         tr            = tid % r_tile_;
@@ -561,27 +515,16 @@ class EpsilonDivDivKerngen
         if ( tr >= r_tile_ )
             return;
 
-        for ( int pass = 0; pass < r_passes_; ++pass )
-        {
-            const int r_cell_pass = r0 + pass * r_tile_ + tr;
-            if ( r_cell_pass >= hex_rad_ )
-                break;
+        const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
+        const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
 
-            const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell_pass, CMB );
-            const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell_pass + 1, SURFACE );
-
-            operator_slow_path(
-                team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell_pass, at_cmb, at_surface );
-        }
+        operator_slow_path(
+            team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell, at_cmb, at_surface );
     }
 
     /**
      * @brief Team entry for fast Dirichlet/Neumann matrix-free path.
-     *
-     * Templated on Diagonal so the compiler can dead-code-eliminate the
-     * unused matvec or diagonal-only path, reducing register pressure.
      */
-    template < bool Diagonal >
     KOKKOS_INLINE_FUNCTION
     void run_team_fast_dirichlet_neumann( const Team& team ) const
     {
@@ -591,17 +534,16 @@ class EpsilonDivDivKerngen
         if ( tr >= r_tile_ )
             return;
 
-        operator_fast_dirichlet_neumann_path< Diagonal >(
-            team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
+        const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
+        const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
+
+        operator_fast_dirichlet_neumann_path(
+            team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell, at_cmb, at_surface );
     }
 
     /**
      * @brief Team entry for fast free-slip matrix-free path.
-     *
-     * Templated on Diagonal so the compiler can dead-code-eliminate the
-     * unused matvec or diagonal-only path, reducing register pressure.
      */
-    template < bool Diagonal >
     KOKKOS_INLINE_FUNCTION
     void run_team_fast_freeslip( const Team& team ) const
     {
@@ -611,8 +553,11 @@ class EpsilonDivDivKerngen
         if ( tr >= r_tile_ )
             return;
 
-        operator_fast_freeslip_path< Diagonal >(
-            team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
+        const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
+        const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
+
+        operator_fast_freeslip_path(
+            team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell, at_cmb, at_surface );
     }
 
     // ===================== SLOW PATH =====================
@@ -848,7 +793,6 @@ class EpsilonDivDivKerngen
     }
 
     // ===================== FAST DIRICHLET/NEUMANN PATH =====================
-    template < bool Diagonal >
     KOKKOS_INLINE_FUNCTION
     void operator_fast_dirichlet_neumann_path(
         const Team& team,
@@ -860,13 +804,16 @@ class EpsilonDivDivKerngen
         const int   ty,
         const int   tr,
         const int   x_cell,
-        const int   y_cell ) const
+        const int   y_cell,
+        const int   r_cell,
+        const bool  at_cmb,
+        const bool  at_surface ) const
     {
-        const int nlev = r_tile_block_ + 1;
+        const int nlev = r_tile_ + 1;
         const int nxy  = ( lat_tile_ + 1 ) * ( lat_tile_ + 1 );
 
         double* shmem =
-            reinterpret_cast< double* >( team.team_shmem().get_shmem( team_shmem_size_dn( team.team_size() ) ) );
+            reinterpret_cast< double* >( team.team_shmem().get_shmem( team_shmem_size( team.team_size() ) ) );
 
         using ScratchCoords =
             Kokkos::View< double**, Kokkos::LayoutRight, typename Team::scratch_memory_space, Kokkos::MemoryUnmanaged >;
@@ -941,11 +888,37 @@ class EpsilonDivDivKerngen
 
         team.team_barrier();
 
-        if ( x_cell >= hex_lat_ || y_cell >= hex_lat_ )
+        if ( x_cell >= hex_lat_ || y_cell >= hex_lat_ || r_cell >= hex_rad_ )
             return;
 
-        constexpr double ONE_THIRD = 1.0 / 3.0;
-        constexpr double ONE_SIXTH = 1.0 / 6.0;
+        const int    lvl0 = tr;
+        const double r_0  = r_sh( lvl0 );
+        const double r_1  = r_sh( lvl0 + 1 );
+
+        const bool at_boundary              = at_cmb || at_surface;
+        bool       treat_boundary_dirichlet = false;
+        if ( at_boundary )
+        {
+            const ShellBoundaryFlag sbf = at_cmb ? CMB : SURFACE;
+            treat_boundary_dirichlet    = ( get_boundary_condition_flag( bcs_, sbf ) == DIRICHLET );
+        }
+
+        const int cmb_shift = ( ( at_boundary && treat_boundary_dirichlet && ( !diagonal_ ) && at_cmb ) ? 3 : 0 );
+        const int surface_shift =
+            ( ( at_boundary && treat_boundary_dirichlet && ( !diagonal_ ) && at_surface ) ? 3 : 0 );
+
+        static constexpr int WEDGE_NODE_OFF[2][6][3] = {
+            { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 } },
+            { { 1, 1, 0 }, { 0, 1, 0 }, { 1, 0, 0 }, { 1, 1, 1 }, { 0, 1, 1 }, { 1, 0, 1 } } };
+
+        static constexpr int WEDGE_TO_UNIQUE[2][6] = {
+            { 0, 1, 2, 3, 4, 5 },
+            { 6, 2, 1, 7, 5, 4 }
+        };
+
+        constexpr double ONE_THIRD      = 1.0 / 3.0;
+        constexpr double ONE_SIXTH      = 1.0 / 6.0;
+        constexpr double NEG_TWO_THIRDS = -0.66666666666666663;
 
         static constexpr double dN_ref[6][3] = {
             { -0.5, -0.5, -ONE_SIXTH },
@@ -955,197 +928,179 @@ class EpsilonDivDivKerngen
             { 0.5, 0.0, ONE_SIXTH },
             { 0.0, 0.5, ONE_SIXTH } };
 
-        static constexpr int WEDGE_NODE_OFF[2][6][3] = {
-            { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 } },
-            { { 1, 1, 0 }, { 0, 1, 0 }, { 1, 0, 0 }, { 1, 1, 1 }, { 0, 1, 1 }, { 1, 0, 1 } } };
-
         const int n00 = node_id( tx, ty );
         const int n01 = node_id( tx, ty + 1 );
         const int n10 = node_id( tx + 1, ty );
         const int n11 = node_id( tx + 1, ty + 1 );
 
-        for ( int pass = 0; pass < r_passes_; ++pass )
+        for ( int w = 0; w < 2; ++w )
         {
-            const int lvl0   = pass * r_tile_ + tr;
-            const int r_cell = r0 + lvl0;
+            const int v0 = w == 0 ? n00 : n11;
+            const int v1 = w == 0 ? n10 : n01;
+            const int v2 = w == 0 ? n01 : n10;
 
-            if ( r_cell >= hex_rad_ )
-                break;
-
-            const double r_0 = r_sh( lvl0 );
-            const double r_1 = r_sh( lvl0 + 1 );
-
-            const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
-            const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
-
-            const bool at_boundary              = at_cmb || at_surface;
-            bool       treat_boundary_dirichlet = false;
-            if ( at_boundary )
+            double k_sum = 0.0;
+#pragma unroll
+            for ( int node = 0; node < 6; ++node )
             {
-                const ShellBoundaryFlag sbf = at_cmb ? CMB : SURFACE;
-                treat_boundary_dirichlet    = ( get_boundary_condition_flag( bcs_, sbf ) == DIRICHLET );
+                const int ddx = WEDGE_NODE_OFF[w][node][0];
+                const int ddy = WEDGE_NODE_OFF[w][node][1];
+                const int ddr = WEDGE_NODE_OFF[w][node][2];
+
+                const int nid = node_id( tx + ddx, ty + ddy );
+                const int lvl = lvl0 + ddr;
+
+                k_sum += k_sh( nid, lvl );
+            }
+            const double k_eval = ONE_SIXTH * k_sum;
+
+            double wJ = 0.0;
+            double i00, i01, i02;
+            double i10, i11, i12;
+            double i20, i21, i22;
+
+            {
+                const double half_dr = 0.5 * ( r_1 - r_0 );
+                const double r_mid   = 0.5 * ( r_0 + r_1 );
+
+                const double J_0_0 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v1, 0 ) );
+                const double J_0_1 = r_mid * ( -coords_sh( v0, 0 ) + coords_sh( v2, 0 ) );
+                const double J_0_2 = half_dr * ( ONE_THIRD * ( coords_sh( v0, 0 ) + coords_sh( v1, 0 ) + coords_sh( v2, 0 ) ) );
+
+                const double J_1_0 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v1, 1 ) );
+                const double J_1_1 = r_mid * ( -coords_sh( v0, 1 ) + coords_sh( v2, 1 ) );
+                const double J_1_2 = half_dr * ( ONE_THIRD * ( coords_sh( v0, 1 ) + coords_sh( v1, 1 ) + coords_sh( v2, 1 ) ) );
+
+                const double J_2_0 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v1, 2 ) );
+                const double J_2_1 = r_mid * ( -coords_sh( v0, 2 ) + coords_sh( v2, 2 ) );
+                const double J_2_2 = half_dr * ( ONE_THIRD * ( coords_sh( v0, 2 ) + coords_sh( v1, 2 ) + coords_sh( v2, 2 ) ) );
+
+                const double J_det = J_0_0 * J_1_1 * J_2_2 - J_0_0 * J_1_2 * J_2_1 - J_0_1 * J_1_0 * J_2_2 +
+                                     J_0_1 * J_1_2 * J_2_0 + J_0_2 * J_1_0 * J_2_1 - J_0_2 * J_1_1 * J_2_0;
+
+                const double invJ = 1.0 / J_det;
+
+                i00 = invJ * ( J_1_1 * J_2_2 - J_1_2 * J_2_1 );
+                i01 = invJ * ( -J_1_0 * J_2_2 + J_1_2 * J_2_0 );
+                i02 = invJ * ( J_1_0 * J_2_1 - J_1_1 * J_2_0 );
+                i10 = invJ * ( -J_0_1 * J_2_2 + J_0_2 * J_2_1 );
+                i11 = invJ * ( J_0_0 * J_2_2 - J_0_2 * J_2_0 );
+                i12 = invJ * ( -J_0_0 * J_2_1 + J_0_1 * J_2_0 );
+                i20 = invJ * ( J_0_1 * J_1_2 - J_0_2 * J_1_1 );
+                i21 = invJ * ( -J_0_0 * J_1_2 + J_0_2 * J_1_0 );
+                i22 = invJ * ( J_0_0 * J_1_1 - J_0_1 * J_1_0 );
+
+                wJ = Kokkos::abs( J_det );
             }
 
-            const int cmb_shift = ( ( at_boundary && treat_boundary_dirichlet && ( !Diagonal ) && at_cmb ) ? 3 : 0 );
-            const int surface_shift =
-                ( ( at_boundary && treat_boundary_dirichlet && ( !Diagonal ) && at_surface ) ? 3 : 0 );
+            const double kwJ = k_eval * wJ;
 
-            // half_dr / r_mid are pass-dependent but wedge-independent — compute once.
-            const double half_dr = 0.5 * ( r_1 - r_0 );
-            const double r_mid   = 0.5 * ( r_0 + r_1 );
+            // Per-wedge output accumulator (scatter after each wedge to reduce register pressure)
+            double dst_w[3][6] = { 0.0 };
 
-            for ( int w = 0; w < 2; ++w )
+            double gu00 = 0.0;
+            double gu10 = 0.0, gu11 = 0.0;
+            double gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
+            double div_u = 0.0;
+
+            if ( !diagonal_ )
             {
-                const int v0 = w == 0 ? n00 : n11;
-                const int v1 = w == 0 ? n10 : n01;
-                const int v2 = w == 0 ? n01 : n10;
-
-                double k_sum = 0.0;
-                for ( int node = 0; node < 6; ++node )
+                // Trial side: accumulate symmetric gradient of u (fused dim loops).
+                // Physical gradients computed inline to avoid local memory spills.
+#pragma unroll
+                for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                 {
-                    const int nid = node_id( tx + WEDGE_NODE_OFF[w][node][0], ty + WEDGE_NODE_OFF[w][node][1] );
-                    k_sum += k_sh( nid, lvl0 + WEDGE_NODE_OFF[w][node][2] );
-                }
-                const double k_eval = ONE_SIXTH * k_sum;
+                    const double gx = dN_ref[n][0];
+                    const double gy = dN_ref[n][1];
+                    const double gz = dN_ref[n][2];
+                    const double g0 = i00 * gx + i01 * gy + i02 * gz;
+                    const double g1 = i10 * gx + i11 * gy + i12 * gz;
+                    const double g2 = i20 * gx + i21 * gy + i22 * gz;
 
-                // ==== Hybrid invJ: compact geometry → fast 3-FMA gradients ====
-                //
-                // J = [r_mid*L1 | r_mid*L2 | half_dr*Rm],  det(J) = r_mid^2 * half_dr * lat_det
-                // invJ rows:  row0 = s01*A, row1 = s01*B, row2 = s_r*C
-                //   A = L2×Rm,  B = Rm×L1,  C = L1×L2
-                //   s01 = 1/(r_mid*lat_det),  s_r = 1/(half_dr*lat_det)
-                // Store as i_rd = invJ[r][d]; gradient: g0 = i00*gx + i01*gy + i02*gz  (3 FMAs)
-                double i00, i01, i02, i10, i11, i12, i20, i21, i22, kwJ;
-                {
-                    const double L1x = coords_sh( v1, 0 ) - coords_sh( v0, 0 );
-                    const double L1y = coords_sh( v1, 1 ) - coords_sh( v0, 1 );
-                    const double L1z = coords_sh( v1, 2 ) - coords_sh( v0, 2 );
-                    const double L2x = coords_sh( v2, 0 ) - coords_sh( v0, 0 );
-                    const double L2y = coords_sh( v2, 1 ) - coords_sh( v0, 1 );
-                    const double L2z = coords_sh( v2, 2 ) - coords_sh( v0, 2 );
-                    const double Rmx = ONE_THIRD * ( coords_sh( v0, 0 ) + coords_sh( v1, 0 ) + coords_sh( v2, 0 ) );
-                    const double Rmy = ONE_THIRD * ( coords_sh( v0, 1 ) + coords_sh( v1, 1 ) + coords_sh( v2, 1 ) );
-                    const double Rmz = ONE_THIRD * ( coords_sh( v0, 2 ) + coords_sh( v1, 2 ) + coords_sh( v2, 2 ) );
+                    const int ddx = WEDGE_NODE_OFF[w][n][0];
+                    const int ddy = WEDGE_NODE_OFF[w][n][1];
+                    const int ddr = WEDGE_NODE_OFF[w][n][2];
+                    const int nid = node_id( tx + ddx, ty + ddy );
+                    const int lvl = lvl0 + ddr;
 
-                    const double Ax = L2y * Rmz - L2z * Rmy; // A = L2 × Rm
-                    const double Ay = L2z * Rmx - L2x * Rmz;
-                    const double Az = L2x * Rmy - L2y * Rmx;
-                    const double Bx = Rmy * L1z - Rmz * L1y; // B = Rm × L1
-                    const double By = Rmz * L1x - Rmx * L1z;
-                    const double Bz = Rmx * L1y - Rmy * L1x;
-                    const double Cx = L1y * L2z - L1z * L2y; // C = L1 × L2
-                    const double Cy = L1z * L2x - L1x * L2z;
-                    const double Cz = L1x * L2y - L1y * L2x;
-                    const double lat_det = L1x * Ax + L1y * Ay + L1z * Az;
+                    const double s0 = src_sh( nid, 0, lvl );
+                    const double s1 = src_sh( nid, 1, lvl );
+                    const double s2 = src_sh( nid, 2, lvl );
 
-                    const double s01 = 1.0 / ( r_mid   * lat_det );
-                    const double s_r = 1.0 / ( half_dr * lat_det );
-                    kwJ = k_eval * Kokkos::abs( lat_det * r_mid * r_mid * half_dr );
-
-                    i00 = s01 * Ax;  i01 = s01 * Bx;  i02 = s_r * Cx;
-                    i10 = s01 * Ay;  i11 = s01 * By;  i12 = s_r * Cy;
-                    i20 = s01 * Az;  i21 = s01 * Bz;  i22 = s_r * Cz;
-                } // L1,L2,Rm,A,B,C,lat_det,s01,s_r freed
-
-                // ==== Gather: accumulate stress σ = 2ε(u) - (2/3)div(u)·I directly ====
-                // Fuses the strain, divergence, and scaling into a single pass so
-                // the scatter becomes a clean symmetric matvec: dst = kwJ · σ · g.
-                // The 0.5 in ε_ij and 2× in the original kwJ2 cancel for off-diags;
-                // the -(2/3)·div term is folded per trial node into the diagonal.
-                constexpr double NEG_TWO_THIRDS = -0.66666666666666663;
-                double sig00 = 0.0, sig11 = 0.0, sig22 = 0.0;
-                double sig10 = 0.0, sig20 = 0.0, sig21 = 0.0;
-                if ( !Diagonal )
-                {
-                    for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
-                    {
-                        const double gx = dN_ref[n][0];
-                        const double gy = dN_ref[n][1];
-                        const double gz = dN_ref[n][2];
-                        const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                        const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                        const double g2 = i20 * gx + i21 * gy + i22 * gz;
-
-                        const int nid = node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
-                        const int lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
-
-                        const double s0   = src_sh( nid, 0, lvl );
-                        const double s1   = src_sh( nid, 1, lvl );
-                        const double src2 = src_sh( nid, 2, lvl );
-
-                        const double div_n = NEG_TWO_THIRDS * ( g0 * s0 + g1 * s1 + g2 * src2 );
-
-                        sig00 += 2.0 * g0 * s0 + div_n;
-                        sig11 += 2.0 * g1 * s1 + div_n;
-                        sig22 += 2.0 * g2 * src2 + div_n;
-                        sig10 += g1 * s0 + g0 * s1;
-                        sig20 += g2 * s0 + g0 * src2;
-                        sig21 += g2 * s1 + g1 * src2;
-                    }
+                    gu00  += g0 * s0;
+                    gu11  += g1 * s1;
+                    gu22  += g2 * s2;
+                    gu10  += 0.5 * ( g1 * s0 + g0 * s1 );
+                    gu20  += 0.5 * ( g2 * s0 + g0 * s2 );
+                    gu21  += 0.5 * ( g2 * s1 + g1 * s2 );
+                    div_u += g0 * s0 + g1 * s1 + g2 * s2;
                 }
 
-                // ==== Scatter: symmetric matvec dst = kwJ · σ · g (reuses i00..i22) ====
-                if ( !Diagonal )
+                // Test side: compute dst for all 3 dims at once (fused).
+                // 2*epsilon(v):epsilon(u) - (2/3)*div(v)*div(u)
+#pragma unroll
+                for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
                 {
-                    for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
-                    {
-                        const double gx = dN_ref[n][0];
-                        const double gy = dN_ref[n][1];
-                        const double gz = dN_ref[n][2];
-                        const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                        const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                        const double g2 = i20 * gx + i21 * gy + i22 * gz;
+                    const double gx = dN_ref[n][0];
+                    const double gy = dN_ref[n][1];
+                    const double gz = dN_ref[n][2];
+                    const double g0 = i00 * gx + i01 * gy + i02 * gz;
+                    const double g1 = i10 * gx + i11 * gy + i12 * gz;
+                    const double g2 = i20 * gx + i21 * gy + i22 * gz;
 
-                        const int ddx = WEDGE_NODE_OFF[w][n][0];
-                        const int ddy = WEDGE_NODE_OFF[w][n][1];
-                        const int ddr = WEDGE_NODE_OFF[w][n][2];
-                        Kokkos::atomic_add(
-                            &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 0 ),
-                            kwJ * ( g0 * sig00 + g1 * sig10 + g2 * sig20 ) );
-                        Kokkos::atomic_add(
-                            &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 1 ),
-                            kwJ * ( g0 * sig10 + g1 * sig11 + g2 * sig21 ) );
-                        Kokkos::atomic_add(
-                            &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 2 ),
-                            kwJ * ( g0 * sig20 + g1 * sig21 + g2 * sig22 ) );
-                    }
+                    dst_w[0][n] +=
+                        kwJ * ( 2.0 * ( g0 * gu00 + g1 * gu10 + g2 * gu20 ) + NEG_TWO_THIRDS * g0 * div_u );
+                    dst_w[1][n] +=
+                        kwJ * ( 2.0 * ( g0 * gu10 + g1 * gu11 + g2 * gu21 ) + NEG_TWO_THIRDS * g1 * div_u );
+                    dst_w[2][n] +=
+                        kwJ * ( 2.0 * ( g0 * gu20 + g1 * gu21 + g2 * gu22 ) + NEG_TWO_THIRDS * g2 * div_u );
                 }
+            }
 
-                if ( Diagonal || ( treat_boundary_dirichlet && at_boundary ) )
+            if ( diagonal_ || ( treat_boundary_dirichlet && at_boundary ) )
+            {
+                // Diagonal action: kwJ * s_d * (|g|^2 + (1/3) * g_d^2)
+#pragma unroll
+                for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
                 {
-                    for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
-                    {
-                        const double gx = dN_ref[n][0];
-                        const double gy = dN_ref[n][1];
-                        const double gz = dN_ref[n][2];
-                        const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                        const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                        const double g2 = i20 * gx + i21 * gy + i22 * gz;
-                        const double gg = g0 * g0 + g1 * g1 + g2 * g2;
+                    const double gx = dN_ref[n][0];
+                    const double gy = dN_ref[n][1];
+                    const double gz = dN_ref[n][2];
+                    const double g0 = i00 * gx + i01 * gy + i02 * gz;
+                    const double g1 = i10 * gx + i11 * gy + i12 * gz;
+                    const double g2 = i20 * gx + i21 * gy + i22 * gz;
+                    const double gg = g0 * g0 + g1 * g1 + g2 * g2;
 
-                        const int nid = node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
-                        const int lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
+                    const int ddx = WEDGE_NODE_OFF[w][n][0];
+                    const int ddy = WEDGE_NODE_OFF[w][n][1];
+                    const int ddr = WEDGE_NODE_OFF[w][n][2];
+                    const int nid = node_id( tx + ddx, ty + ddy );
+                    const int lvl = lvl0 + ddr;
 
-                        const double sv0 = src_sh( nid, 0, lvl );
-                        const double sv1 = src_sh( nid, 1, lvl );
-                        const double sv2 = src_sh( nid, 2, lvl );
-
-                        const int ddx = WEDGE_NODE_OFF[w][n][0];
-                        const int ddy = WEDGE_NODE_OFF[w][n][1];
-                        const int ddr = WEDGE_NODE_OFF[w][n][2];
-                        Kokkos::atomic_add(
-                            &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 0 ),
-                            kwJ * sv0 * ( gg + ONE_THIRD * g0 * g0 ) );
-                        Kokkos::atomic_add(
-                            &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 1 ),
-                            kwJ * sv1 * ( gg + ONE_THIRD * g1 * g1 ) );
-                        Kokkos::atomic_add(
-                            &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, 2 ),
-                            kwJ * sv2 * ( gg + ONE_THIRD * g2 * g2 ) );
-                    }
+                    const double s0 = src_sh( nid, 0, lvl );
+                    const double s1 = src_sh( nid, 1, lvl );
+                    const double s2 = src_sh( nid, 2, lvl );
+                    dst_w[0][n] += kwJ * s0 * ( gg + ONE_THIRD * g0 * g0 );
+                    dst_w[1][n] += kwJ * s1 * ( gg + ONE_THIRD * g1 * g1 );
+                    dst_w[2][n] += kwJ * s2 * ( gg + ONE_THIRD * g2 * g2 );
                 }
+            }
 
-            } // end wedge loop
+            // Scatter this wedge's contributions immediately
+#pragma unroll
+            for ( int n = 0; n < 6; ++n )
+            {
+                const int ddx = WEDGE_NODE_OFF[w][n][0];
+                const int ddy = WEDGE_NODE_OFF[w][n][1];
+                const int ddr = WEDGE_NODE_OFF[w][n][2];
+                for ( int dim_add = 0; dim_add < 3; ++dim_add )
+                {
+                    Kokkos::atomic_add(
+                        &dst_( local_subdomain_id, x_cell + ddx, y_cell + ddy, r_cell + ddr, dim_add ),
+                        dst_w[dim_add][n] );
+                }
+            }
+
         }
     }
 
@@ -1178,7 +1133,6 @@ class EpsilonDivDivKerngen
         uz -= dot * nz;
     }
 
-    template < bool Diagonal >
     KOKKOS_INLINE_FUNCTION
     void operator_fast_freeslip_path(
         const Team& team,
@@ -1190,9 +1144,12 @@ class EpsilonDivDivKerngen
         const int   ty,
         const int   tr,
         const int   x_cell,
-        const int   y_cell ) const
+        const int   y_cell,
+        const int   r_cell,
+        const bool  at_cmb,
+        const bool  at_surface ) const
     {
-        const int nlev = r_tile_block_ + 1;
+        const int nlev = r_tile_ + 1;
         const int nxy  = ( lat_tile_ + 1 ) * ( lat_tile_ + 1 );
 
         double* shmem =
@@ -1208,10 +1165,6 @@ class EpsilonDivDivKerngen
         ScratchCoords coords_sh( shmem, nxy, 3 );
         shmem += nxy * 3;
 
-        // Normalized normals in shared memory — avoids 12 persistent register-doubles.
-        ScratchCoords normals_sh( shmem, nxy, 3 );
-        shmem += nxy * 3;
-
         ScratchSrc src_sh( shmem, nxy, 3, nlev );
         shmem += nxy * 3 * nlev;
 
@@ -1224,7 +1177,6 @@ class EpsilonDivDivKerngen
 
         auto node_id = [&]( int nx, int ny ) -> int { return nx + ( lat_tile_ + 1 ) * ny; };
 
-        // Preload coords + compute normalized normals cooperatively.
         Kokkos::parallel_for( Kokkos::TeamThreadRange( team, nxy ), [&]( int n ) {
             const int dxn = n % ( lat_tile_ + 1 );
             const int dyn = n / ( lat_tile_ + 1 );
@@ -1233,30 +1185,13 @@ class EpsilonDivDivKerngen
 
             if ( xi <= hex_lat_ && yi <= hex_lat_ )
             {
-                const double cx = grid_( local_subdomain_id, xi, yi, 0 );
-                const double cy = grid_( local_subdomain_id, xi, yi, 1 );
-                const double cz = grid_( local_subdomain_id, xi, yi, 2 );
-                coords_sh( n, 0 ) = cx;
-                coords_sh( n, 1 ) = cy;
-                coords_sh( n, 2 ) = cz;
-
-                const double n2 = cx * cx + cy * cy + cz * cz;
-                if ( n2 > 0.0 )
-                {
-                    const double invn = 1.0 / Kokkos::sqrt( n2 );
-                    normals_sh( n, 0 ) = cx * invn;
-                    normals_sh( n, 1 ) = cy * invn;
-                    normals_sh( n, 2 ) = cz * invn;
-                }
-                else
-                {
-                    normals_sh( n, 0 ) = normals_sh( n, 1 ) = normals_sh( n, 2 ) = 0.0;
-                }
+                coords_sh( n, 0 ) = grid_( local_subdomain_id, xi, yi, 0 );
+                coords_sh( n, 1 ) = grid_( local_subdomain_id, xi, yi, 1 );
+                coords_sh( n, 2 ) = grid_( local_subdomain_id, xi, yi, 2 );
             }
             else
             {
                 coords_sh( n, 0 ) = coords_sh( n, 1 ) = coords_sh( n, 2 ) = 0.0;
-                normals_sh( n, 0 ) = normals_sh( n, 1 ) = normals_sh( n, 2 ) = 0.0;
             }
         } );
 
@@ -1293,22 +1228,12 @@ class EpsilonDivDivKerngen
 
         team.team_barrier();
 
-        if ( x_cell >= hex_lat_ || y_cell >= hex_lat_ )
+        if ( x_cell >= hex_lat_ || y_cell >= hex_lat_ || r_cell >= hex_rad_ )
             return;
 
-        for ( int pass = 0; pass < r_passes_; ++pass )
-        {
-        const int    lvl0   = pass * r_tile_ + tr;
-        const int    r_cell = r0 + lvl0;
-
-        if ( r_cell >= hex_rad_ )
-            break;
-
+        const int    lvl0 = tr;
         const double r_0  = r_sh( lvl0 );
         const double r_1  = r_sh( lvl0 + 1 );
-
-        const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
-        const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
 
         const BoundaryConditionFlag cmb_bc     = get_boundary_condition_flag( bcs_, CMB );
         const BoundaryConditionFlag surface_bc = get_boundary_condition_flag( bcs_, SURFACE );
@@ -1318,8 +1243,8 @@ class EpsilonDivDivKerngen
         const bool cmb_dirichlet     = at_cmb && ( cmb_bc == DIRICHLET );
         const bool surface_dirichlet = at_surface && ( surface_bc == DIRICHLET );
 
-        const int cmb_shift     = ( ( cmb_dirichlet && ( !Diagonal ) ) ? 3 : 0 );
-        const int surface_shift = ( ( surface_dirichlet && ( !Diagonal ) ) ? 3 : 0 );
+        const int cmb_shift     = ( ( cmb_dirichlet && ( !diagonal_ ) ) ? 3 : 0 );
+        const int surface_shift = ( ( surface_dirichlet && ( !diagonal_ ) ) ? 3 : 0 );
 
         static constexpr int WEDGE_NODE_OFF[2][6][3] = {
             { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 } },
@@ -1347,18 +1272,87 @@ class EpsilonDivDivKerngen
         const int n10 = node_id( tx + 1, ty );
         const int n11 = node_id( tx + 1, ty + 1 );
 
-        // Corner-to-shared-memory-node mapping: 0→n00, 1→n10, 2→n01, 3→n11.
-        const int corner_node[4] = { n00, n10, n01, n11 };
-        // Corner-to-unique-node for CMB (r=0) and surface (r=1) layers.
-        static constexpr int CMB_CORNER_TO_UNIQUE[4]  = { 0, 1, 2, 6 };
-        static constexpr int SURF_CORNER_TO_UNIQUE[4] = { 3, 4, 5, 7 };
+        double src8[3][8];
 
-        double dst8[3][8] = { { 0.0 } };
+        src8[0][0] = src_sh( n00, 0, lvl0 );
+        src8[1][0] = src_sh( n00, 1, lvl0 );
+        src8[2][0] = src_sh( n00, 2, lvl0 );
+        src8[0][1] = src_sh( n10, 0, lvl0 );
+        src8[1][1] = src_sh( n10, 1, lvl0 );
+        src8[2][1] = src_sh( n10, 2, lvl0 );
+        src8[0][2] = src_sh( n01, 0, lvl0 );
+        src8[1][2] = src_sh( n01, 1, lvl0 );
+        src8[2][2] = src_sh( n01, 2, lvl0 );
+        src8[0][6] = src_sh( n11, 0, lvl0 );
+        src8[1][6] = src_sh( n11, 1, lvl0 );
+        src8[2][6] = src_sh( n11, 2, lvl0 );
 
-        // Scalar Ann accumulators per corner.  Accumulated inside the test-side loop
-        // (merged from the former separate Ann loop to reuse already-computed gradients).
-        double Ann_acc_cmb[4]  = {};
-        double Ann_acc_surf[4] = {};
+        src8[0][3] = src_sh( n00, 0, lvl0 + 1 );
+        src8[1][3] = src_sh( n00, 1, lvl0 + 1 );
+        src8[2][3] = src_sh( n00, 2, lvl0 + 1 );
+        src8[0][4] = src_sh( n10, 0, lvl0 + 1 );
+        src8[1][4] = src_sh( n10, 1, lvl0 + 1 );
+        src8[2][4] = src_sh( n10, 2, lvl0 + 1 );
+        src8[0][5] = src_sh( n01, 0, lvl0 + 1 );
+        src8[1][5] = src_sh( n01, 1, lvl0 + 1 );
+        src8[2][5] = src_sh( n01, 2, lvl0 + 1 );
+        src8[0][7] = src_sh( n11, 0, lvl0 + 1 );
+        src8[1][7] = src_sh( n11, 1, lvl0 + 1 );
+        src8[2][7] = src_sh( n11, 2, lvl0 + 1 );
+
+        double nx00 = coords_sh( n00, 0 ), ny00 = coords_sh( n00, 1 ), nz00 = coords_sh( n00, 2 );
+        double nx10 = coords_sh( n10, 0 ), ny10 = coords_sh( n10, 1 ), nz10 = coords_sh( n10, 2 );
+        double nx01 = coords_sh( n01, 0 ), ny01 = coords_sh( n01, 1 ), nz01 = coords_sh( n01, 2 );
+        double nx11 = coords_sh( n11, 0 ), ny11 = coords_sh( n11, 1 ), nz11 = coords_sh( n11, 2 );
+
+        normalize3( nx00, ny00, nz00 );
+        normalize3( nx10, ny10, nz10 );
+        normalize3( nx01, ny01, nz01 );
+        normalize3( nx11, ny11, nz11 );
+
+        // Save normal components of src at free-slip boundary nodes before trial-side projection.
+        // Used in two places:
+        //  - non-diagonal mode: to restore A_nn * u_n * n after the test-side projection
+        //    (normal_corr mechanism).
+        //  - diagonal mode: to reconstruct the unprojected src inside apply_rotated_diag so
+        //    that R^T diag(RAR^T) R src can be evaluated.
+        // Corner indexing: 0=n00, 1=n10, 2=n01, 3=n11.
+        double u_n_cmb[4]  = {};
+        double u_n_surf[4] = {};
+        if ( cmb_freeslip )
+        {
+            u_n_cmb[0] = nx00 * src8[0][0] + ny00 * src8[1][0] + nz00 * src8[2][0];
+            u_n_cmb[1] = nx10 * src8[0][1] + ny10 * src8[1][1] + nz10 * src8[2][1];
+            u_n_cmb[2] = nx01 * src8[0][2] + ny01 * src8[1][2] + nz01 * src8[2][2];
+            u_n_cmb[3] = nx11 * src8[0][6] + ny11 * src8[1][6] + nz11 * src8[2][6];
+        }
+        if ( surf_freeslip )
+        {
+            u_n_surf[0] = nx00 * src8[0][3] + ny00 * src8[1][3] + nz00 * src8[2][3];
+            u_n_surf[1] = nx10 * src8[0][4] + ny10 * src8[1][4] + nz10 * src8[2][4];
+            u_n_surf[2] = nx01 * src8[0][5] + ny01 * src8[1][5] + nz01 * src8[2][5];
+            u_n_surf[3] = nx11 * src8[0][7] + ny11 * src8[1][7] + nz11 * src8[2][7];
+        }
+
+        if ( cmb_freeslip )
+        {
+            project_tangential_inplace( nx00, ny00, nz00, src8[0][0], src8[1][0], src8[2][0] );
+            project_tangential_inplace( nx10, ny10, nz10, src8[0][1], src8[1][1], src8[2][1] );
+            project_tangential_inplace( nx01, ny01, nz01, src8[0][2], src8[1][2], src8[2][2] );
+            project_tangential_inplace( nx11, ny11, nz11, src8[0][6], src8[1][6], src8[2][6] );
+        }
+        if ( surf_freeslip )
+        {
+            project_tangential_inplace( nx00, ny00, nz00, src8[0][3], src8[1][3], src8[2][3] );
+            project_tangential_inplace( nx10, ny10, nz10, src8[0][4], src8[1][4], src8[2][4] );
+            project_tangential_inplace( nx01, ny01, nz01, src8[0][5], src8[1][5], src8[2][5] );
+            project_tangential_inplace( nx11, ny11, nz11, src8[0][7], src8[1][7], src8[2][7] );
+        }
+
+        double dst8[3][8]        = { { 0.0 } };
+        double normal_corr[3][8] = {};
+
+        
 
         for ( int w = 0; w < 2; ++w )
         {
@@ -1423,157 +1417,186 @@ class EpsilonDivDivKerngen
 
             const double kwJ = k_eval * wJ;
 
-            // ---- Fused trial + test side with merged Ann accumulation ----
-            static constexpr int CMB_NODE_TO_CORNER[2][3] = { { 0, 1, 2 }, { 3, 2, 1 } };
+            // Accumulate normal-normal diagonal correction for free-slip boundary nodes.
+            // For each boundary node u with outward unit normal n_u and shape-function physical
+            // gradient g_u = J^{-T} dN_ref[node_idx]:
+            //   A_nn_u += kwJ * ( |g_u|^2 + (1/3) * (n_u · g_u)^2 )
+            // This equals n_u^T · A_3x3_self_u · n_u — the (0,0) entry of R_u A R_u^T in the
+            // normal-tangential frame — which the slow path preserves on its diagonal.
+            // Map: (w, in-boundary index ni in 0..2) -> corner index {0=n00,1=n10,2=n01,3=n11}
+            // normal_corr is only needed for the non-diagonal operator apply (P A P + A_nn u_n n).
+            // In diagonal mode the rotated-frame diagonal is used directly (see below).
+            if ( !diagonal_ && ( cmb_freeslip || surf_freeslip ) )
+            {
+                static constexpr int CMB_NODE_TO_CORNER[2][3] = { { 0, 1, 2 }, { 3, 2, 1 } };
+                const double         cn[4][3]                 = { { nx00, ny00, nz00 },
+                                                   { nx10, ny10, nz10 },
+                                                   { nx01, ny01, nz01 },
+                                                   { nx11, ny11, nz11 } };
+                if ( cmb_freeslip )
+                {
+                    for ( int ni = 0; ni < 3; ++ni )
+                    {
+                        const int    corner = CMB_NODE_TO_CORNER[w][ni];
+                        const double nxu = cn[corner][0], nyu = cn[corner][1], nzu = cn[corner][2];
+
+                        const double gx  = dN_ref[ni][0];
+                        const double gy  = dN_ref[ni][1];
+                        const double gz  = dN_ref[ni][2];
+                        const double g0  = i00 * gx + i01 * gy + i02 * gz;
+                        const double g1  = i10 * gx + i11 * gy + i12 * gz;
+                        const double g2  = i20 * gx + i21 * gy + i22 * gz;
+                        const double gg  = g0 * g0 + g1 * g1 + g2 * g2;
+                        const double ng  = nxu * g0 + nyu * g1 + nzu * g2;
+                        const double Ann = kwJ * ( gg + ONE_THIRD * ng * ng );
+                        const double c   = Ann * u_n_cmb[corner];
+                        const int    u   = WEDGE_TO_UNIQUE[w][ni];
+
+                        normal_corr[0][u] += c * nxu;
+                        normal_corr[1][u] += c * nyu;
+                        normal_corr[2][u] += c * nzu;
+                    }
+                }
+                if ( surf_freeslip )
+                {
+                    for ( int ni = 0; ni < 3; ++ni )
+                    {
+                        const int    corner = CMB_NODE_TO_CORNER[w][ni];
+                        const double nxu = cn[corner][0], nyu = cn[corner][1], nzu = cn[corner][2];
+
+                        const double gx  = dN_ref[ni + 3][0];
+                        const double gy  = dN_ref[ni + 3][1];
+                        const double gz  = dN_ref[ni + 3][2];
+                        const double g0  = i00 * gx + i01 * gy + i02 * gz;
+                        const double g1  = i10 * gx + i11 * gy + i12 * gz;
+                        const double g2  = i20 * gx + i21 * gy + i22 * gz;
+                        const double gg  = g0 * g0 + g1 * g1 + g2 * g2;
+                        const double ng  = nxu * g0 + nyu * g1 + nzu * g2;
+                        const double Ann = kwJ * ( gg + ONE_THIRD * ng * ng );
+                        const double c   = Ann * u_n_surf[corner];
+                        const int    u   = WEDGE_TO_UNIQUE[w][ni + 3];
+
+                        normal_corr[0][u] += c * nxu;
+                        normal_corr[1][u] += c * nyu;
+                        normal_corr[2][u] += c * nzu;
+                    }
+                }
+            }
 
             double gu00 = 0.0;
             double gu10 = 0.0, gu11 = 0.0;
             double gu20 = 0.0, gu21 = 0.0, gu22 = 0.0;
             double div_u = 0.0;
 
-            if ( !Diagonal )
+            if ( !diagonal_ )
             {
-                // Trial side: accumulate symmetric gradient of u (fused dim loops).
-                // Read directly from shared memory with inline tangential projection for freeslip nodes.
-#pragma unroll
-                for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                for ( int dimj = 0; dimj < 3; ++dimj )
                 {
-                    const double gx = dN_ref[n][0];
-                    const double gy = dN_ref[n][1];
-                    const double gz = dN_ref[n][2];
-                    const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                    const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                    const double g2 = i20 * gx + i21 * gy + i22 * gz;
-
-                    const int nid = node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
-                    const int lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
-
-                    double s0 = src_sh( nid, 0, lvl );
-                    double s1 = src_sh( nid, 1, lvl );
-                    double s2 = src_sh( nid, 2, lvl );
-
-                    // Inline tangential projection for freeslip boundary nodes.
-                    if ( cmb_freeslip && n < 3 )
+#pragma unroll
+                    for ( int node_idx = cmb_shift; node_idx < 6 - surface_shift; ++node_idx )
                     {
-                        const double nx  = normals_sh( nid, 0 );
-                        const double ny  = normals_sh( nid, 1 );
-                        const double nz  = normals_sh( nid, 2 );
-                        const double dot = nx * s0 + ny * s1 + nz * s2;
-                        s0 -= dot * nx;
-                        s1 -= dot * ny;
-                        s2 -= dot * nz;
-                    }
-                    if ( surf_freeslip && n >= 3 )
-                    {
-                        const double nx  = normals_sh( nid, 0 );
-                        const double ny  = normals_sh( nid, 1 );
-                        const double nz  = normals_sh( nid, 2 );
-                        const double dot = nx * s0 + ny * s1 + nz * s2;
-                        s0 -= dot * nx;
-                        s1 -= dot * ny;
-                        s2 -= dot * nz;
-                    }
+                        const double gx = dN_ref[node_idx][0];
+                        const double gy = dN_ref[node_idx][1];
+                        const double gz = dN_ref[node_idx][2];
 
-                    gu00  += g0 * s0;
-                    gu11  += g1 * s1;
-                    gu22  += g2 * s2;
-                    gu10  += 0.5 * ( g1 * s0 + g0 * s1 );
-                    gu20  += 0.5 * ( g2 * s0 + g0 * s2 );
-                    gu21  += 0.5 * ( g2 * s1 + g1 * s2 );
-                    div_u += g0 * s0 + g1 * s1 + g2 * s2;
+                        const double g0 = i00 * gx + i01 * gy + i02 * gz;
+                        const double g1 = i10 * gx + i11 * gy + i12 * gz;
+                        const double g2 = i20 * gx + i21 * gy + i22 * gz;
+
+                        double E00, E11, E22, sym01, sym02, sym12, gdd;
+                        column_grad_to_sym( dimj, g0, g1, g2, E00, E11, E22, sym01, sym02, sym12, gdd );
+
+                        const int    u = WEDGE_TO_UNIQUE[w][node_idx];
+                        const double s = src8[dimj][u];
+
+                        gu00 += E00 * s;
+                        gu10 += sym01 * s;
+                        gu11 += E11 * s;
+                        gu20 += sym02 * s;
+                        gu21 += sym12 * s;
+                        gu22 += E22 * s;
+                        div_u += gdd * s;
+                    }
                 }
 
-                // Test side + merged Ann accumulation.
-                // Ann uses the same gradient already computed — no separate loop needed.
-#pragma unroll
-                for ( int n = cmb_shift; n < 6 - surface_shift; ++n )
+                for ( int dimi = 0; dimi < 3; ++dimi )
                 {
-                    const double gx = dN_ref[n][0];
-                    const double gy = dN_ref[n][1];
-                    const double gz = dN_ref[n][2];
-                    const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                    const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                    const double g2 = i20 * gx + i21 * gy + i22 * gz;
-
-                    const int uid = WEDGE_TO_UNIQUE[w][n];
-                    dst8[0][uid] +=
-                        kwJ * ( 2.0 * ( g0 * gu00 + g1 * gu10 + g2 * gu20 ) + NEG_TWO_THIRDS * g0 * div_u );
-                    dst8[1][uid] +=
-                        kwJ * ( 2.0 * ( g0 * gu10 + g1 * gu11 + g2 * gu21 ) + NEG_TWO_THIRDS * g1 * div_u );
-                    dst8[2][uid] +=
-                        kwJ * ( 2.0 * ( g0 * gu20 + g1 * gu21 + g2 * gu22 ) + NEG_TWO_THIRDS * g2 * div_u );
-
-                    // Accumulate Ann for freeslip CMB nodes (n < 3) and surface nodes (n >= 3).
-                    if ( cmb_freeslip && n < 3 )
+#pragma unroll
+                    for ( int node_idx = cmb_shift; node_idx < 6 - surface_shift; ++node_idx )
                     {
-                        const int    corner = CMB_NODE_TO_CORNER[w][n];
-                        const int    cn     = corner_node[corner];
-                        const double nxu    = normals_sh( cn, 0 );
-                        const double nyu    = normals_sh( cn, 1 );
-                        const double nzu    = normals_sh( cn, 2 );
-                        const double gg     = g0 * g0 + g1 * g1 + g2 * g2;
-                        const double ng     = nxu * g0 + nyu * g1 + nzu * g2;
-                        Ann_acc_cmb[corner] += kwJ * ( gg + ONE_THIRD * ng * ng );
-                    }
-                    if ( surf_freeslip && n >= 3 )
-                    {
-                        const int    corner = CMB_NODE_TO_CORNER[w][n - 3];
-                        const int    cn     = corner_node[corner];
-                        const double nxu    = normals_sh( cn, 0 );
-                        const double nyu    = normals_sh( cn, 1 );
-                        const double nzu    = normals_sh( cn, 2 );
-                        const double gg     = g0 * g0 + g1 * g1 + g2 * g2;
-                        const double ng     = nxu * g0 + nyu * g1 + nzu * g2;
-                        Ann_acc_surf[corner] += kwJ * ( gg + ONE_THIRD * ng * ng );
+                        const double gx = dN_ref[node_idx][0];
+                        const double gy = dN_ref[node_idx][1];
+                        const double gz = dN_ref[node_idx][2];
+
+                        const double g0 = i00 * gx + i01 * gy + i02 * gz;
+                        const double g1 = i10 * gx + i11 * gy + i12 * gz;
+                        const double g2 = i20 * gx + i21 * gy + i22 * gz;
+
+                        double E00, E11, E22, sym01, sym02, sym12, gdd;
+                        column_grad_to_sym( dimi, g0, g1, g2, E00, E11, E22, sym01, sym02, sym12, gdd );
+
+                        const int u = WEDGE_TO_UNIQUE[w][node_idx];
+
+                        dst8[dimi][u] +=
+                            kwJ * ( NEG_TWO_THIRDS * div_u * gdd + 4.0 * sym01 * gu10 + 4.0 * sym02 * gu20 +
+                                    4.0 * sym12 * gu21 + 2.0 * E00 * gu00 + 2.0 * E11 * gu11 + 2.0 * E22 * gu22 );
                     }
                 }
             }
 
-            // ---- Diagonal / Dirichlet boundary handling (fused) ----
-            if ( Diagonal || cmb_dirichlet || surface_dirichlet )
+
+            if ( diagonal_ || cmb_dirichlet || surface_dirichlet )
             {
-                // Fused diagonal: kwJ * s_d * (|g|^2 + (1/3) * g_d^2)
-#pragma unroll
-                for ( int n = surface_shift; n < 6 - cmb_shift; ++n )
+                for ( int dim_diagBC = 0; dim_diagBC < 3; ++dim_diagBC )
                 {
-                    if ( Diagonal && cmb_freeslip && n < 3 )
-                        continue;
-                    if ( Diagonal && surf_freeslip && n >= 3 )
-                        continue;
+                    for ( int node_idx = surface_shift; node_idx < 6 - cmb_shift; ++node_idx )
+                    {
+                        // In diagonal mode, free-slip boundary nodes are handled below with the
+                        // rotated-frame diagonal (R^T diag(RAR^T) R) to match the slow path.
+                        if ( diagonal_ && cmb_freeslip && node_idx < 3 )
+                            continue;
+                        if ( diagonal_ && surf_freeslip && node_idx >= 3 )
+                            continue;
 
-                    const double gx = dN_ref[n][0];
-                    const double gy = dN_ref[n][1];
-                    const double gz = dN_ref[n][2];
-                    const double g0 = i00 * gx + i01 * gy + i02 * gz;
-                    const double g1 = i10 * gx + i11 * gy + i12 * gz;
-                    const double g2 = i20 * gx + i21 * gy + i22 * gz;
-                    const double gg = g0 * g0 + g1 * g1 + g2 * g2;
+                        const double gx = dN_ref[node_idx][0];
+                        const double gy = dN_ref[node_idx][1];
+                        const double gz = dN_ref[node_idx][2];
 
-                    const int    uid = WEDGE_TO_UNIQUE[w][n];
-                    const int    nid = node_id( tx + WEDGE_NODE_OFF[w][n][0], ty + WEDGE_NODE_OFF[w][n][1] );
-                    const int    lvl = lvl0 + WEDGE_NODE_OFF[w][n][2];
-                    const double s0  = src_sh( nid, 0, lvl );
-                    const double s1  = src_sh( nid, 1, lvl );
-                    const double s2  = src_sh( nid, 2, lvl );
+                        const double g0 = i00 * gx + i01 * gy + i02 * gz;
+                        const double g1 = i10 * gx + i11 * gy + i12 * gz;
+                        const double g2 = i20 * gx + i21 * gy + i22 * gz;
 
-                    dst8[0][uid] += kwJ * s0 * ( gg + ONE_THIRD * g0 * g0 );
-                    dst8[1][uid] += kwJ * s1 * ( gg + ONE_THIRD * g1 * g1 );
-                    dst8[2][uid] += kwJ * s2 * ( gg + ONE_THIRD * g2 * g2 );
+                        double E00, E11, E22, sym01, sym02, sym12, gdd;
+                        column_grad_to_sym( dim_diagBC, g0, g1, g2, E00, E11, E22, sym01, sym02, sym12, gdd );
+
+                        const int    u = WEDGE_TO_UNIQUE[w][node_idx];
+                        const double s = src8[dim_diagBC][u];
+
+                        dst8[dim_diagBC][u] += kwJ * ( 4.0 * s * ( sym01 * sym01 + sym02 * sym02 + sym12 * sym12 ) +
+                                                       2.0 * s * ( E00 * E00 + E11 * E11 + E22 * E22 ) +
+                                                       NEG_TWO_THIRDS * ( gdd * gdd ) * s );
+                    }
                 }
 
                 // For free-slip boundary nodes in diagonal mode: compute R^T diag(R A_3x3 R^T) R src.
-                // Normals loaded from shared memory, u_n recomputed from src_sh (original, unprojected).
-                if ( Diagonal )
+                // The slow path takes the diagonal of the 18x18 matrix *after* rotating to the
+                // normal-tangential frame, giving diag entries kwJ*(gg + (r_alpha . g)^2 / 3) for
+                // alpha in {n, t1, t2}.  The Cartesian diagonal used above differs from this by a
+                // rotation, so it must not be used for free-slip boundary nodes.
+                if ( diagonal_ )
                 {
                     static constexpr int FS_CORNER_MAP[2][3] = { { 0, 1, 2 }, { 3, 2, 1 } };
+                    const double ncoords[4][3]               = { { nx00, ny00, nz00 },
+                                                   { nx10, ny10, nz10 },
+                                                   { nx01, ny01, nz01 },
+                                                   { nx11, ny11, nz11 } };
 
                     auto apply_rotated_diag =
-                        [&]( const int ni, const int node_idx, const int src_lvl ) {
+                        [&]( const int ni, const int node_idx, const double* u_n_arr ) {
                             const int    corner = FS_CORNER_MAP[w][ni];
-                            const int    cn     = corner_node[corner];
-                            const double nxu    = normals_sh( cn, 0 );
-                            const double nyu    = normals_sh( cn, 1 );
-                            const double nzu    = normals_sh( cn, 2 );
+                            const double nxu    = ncoords[corner][0];
+                            const double nyu    = ncoords[corner][1];
+                            const double nzu    = ncoords[corner][2];
                             const int    u      = WEDGE_TO_UNIQUE[w][node_idx];
 
                             const double gx = dN_ref[node_idx][0];
@@ -1591,12 +1614,13 @@ class EpsilonDivDivKerngen
                             n_vec( 2 )      = nzu;
                             const auto R_rot = trafo_mat_cartesian_to_normal_tangential< double >( n_vec );
 
-                            // Read original (unprojected) src directly from shared memory.
-                            // (Previously: projected src8 + u_n*n = original, now simplified.)
-                            const double s0 = src_sh( cn, 0, src_lvl );
-                            const double s1 = src_sh( cn, 1, src_lvl );
-                            const double s2 = src_sh( cn, 2, src_lvl );
+                            // Reconstruct full (unprojected) src at this node.
+                            // src8 was tangentially projected; u_n_arr holds the saved normal component.
+                            const double s0 = src8[0][u] + u_n_arr[corner] * nxu;
+                            const double s1 = src8[1][u] + u_n_arr[corner] * nyu;
+                            const double s2 = src8[2][u] + u_n_arr[corner] * nzu;
 
+                            // Physical gradient and src in normal-tangential frame
                             const double Rg0 = R_rot( 0, 0 ) * g0 + R_rot( 0, 1 ) * g1 + R_rot( 0, 2 ) * g2;
                             const double Rg1 = R_rot( 1, 0 ) * g0 + R_rot( 1, 1 ) * g1 + R_rot( 1, 2 ) * g2;
                             const double Rg2 = R_rot( 2, 0 ) * g0 + R_rot( 2, 1 ) * g1 + R_rot( 2, 2 ) * g2;
@@ -1604,10 +1628,13 @@ class EpsilonDivDivKerngen
                             const double Rs1 = R_rot( 1, 0 ) * s0 + R_rot( 1, 1 ) * s1 + R_rot( 1, 2 ) * s2;
                             const double Rs2 = R_rot( 2, 0 ) * s0 + R_rot( 2, 1 ) * s1 + R_rot( 2, 2 ) * s2;
 
+                            // Rotated-frame diagonal applied to Rsrc:
+                            //   diag_alpha = kwJ * (gg_loc + (1/3) * Rg_alpha^2)
                             const double v0 = kwJ * ( gg_loc + ONE_THIRD * Rg0 * Rg0 ) * Rs0;
                             const double v1 = kwJ * ( gg_loc + ONE_THIRD * Rg1 * Rg1 ) * Rs1;
                             const double v2 = kwJ * ( gg_loc + ONE_THIRD * Rg2 * Rg2 ) * Rs2;
 
+                            // Transform back to Cartesian: R^T [v0, v1, v2]
                             dst8[0][u] += R_rot( 0, 0 ) * v0 + R_rot( 1, 0 ) * v1 + R_rot( 2, 0 ) * v2;
                             dst8[1][u] += R_rot( 0, 1 ) * v0 + R_rot( 1, 1 ) * v1 + R_rot( 2, 1 ) * v2;
                             dst8[2][u] += R_rot( 0, 2 ) * v0 + R_rot( 1, 2 ) * v1 + R_rot( 2, 2 ) * v2;
@@ -1616,90 +1643,45 @@ class EpsilonDivDivKerngen
                     if ( cmb_freeslip )
                     {
                         for ( int ni = 0; ni < 3; ++ni )
-                            apply_rotated_diag( ni, ni, lvl0 );
+                            apply_rotated_diag( ni, ni, u_n_cmb );
                     }
                     if ( surf_freeslip )
                     {
                         for ( int ni = 0; ni < 3; ++ni )
-                            apply_rotated_diag( ni, ni + 3, lvl0 + 1 );
+                            apply_rotated_diag( ni, ni + 3, u_n_surf );
                     }
                 }
             }
         }
 
-        // Test-side projection for free-slip (P A P) — normals loaded from shared memory.
-        if ( !Diagonal && cmb_freeslip )
+        // Test-side projection for free-slip (P A P).
+        // In diagonal mode the rotated-frame diagonal is used, which already encodes the correct
+        // normal/tangential split — no post-projection is needed or wanted.
+        if ( !diagonal_ && cmb_freeslip )
         {
-            for ( int c = 0; c < 4; ++c )
-            {
-                const double nx = normals_sh( corner_node[c], 0 );
-                const double ny = normals_sh( corner_node[c], 1 );
-                const double nz = normals_sh( corner_node[c], 2 );
-                const int    u  = CMB_CORNER_TO_UNIQUE[c];
-                const double dot = nx * dst8[0][u] + ny * dst8[1][u] + nz * dst8[2][u];
-                dst8[0][u] -= dot * nx;
-                dst8[1][u] -= dot * ny;
-                dst8[2][u] -= dot * nz;
-            }
+            project_tangential_inplace( nx00, ny00, nz00, dst8[0][0], dst8[1][0], dst8[2][0] );
+            project_tangential_inplace( nx10, ny10, nz10, dst8[0][1], dst8[1][1], dst8[2][1] );
+            project_tangential_inplace( nx01, ny01, nz01, dst8[0][2], dst8[1][2], dst8[2][2] );
+            project_tangential_inplace( nx11, ny11, nz11, dst8[0][6], dst8[1][6], dst8[2][6] );
         }
-        if ( !Diagonal && surf_freeslip )
+        if ( !diagonal_ && surf_freeslip )
         {
-            for ( int c = 0; c < 4; ++c )
-            {
-                const double nx = normals_sh( corner_node[c], 0 );
-                const double ny = normals_sh( corner_node[c], 1 );
-                const double nz = normals_sh( corner_node[c], 2 );
-                const int    u  = SURF_CORNER_TO_UNIQUE[c];
-                const double dot = nx * dst8[0][u] + ny * dst8[1][u] + nz * dst8[2][u];
-                dst8[0][u] -= dot * nx;
-                dst8[1][u] -= dot * ny;
-                dst8[2][u] -= dot * nz;
-            }
+            project_tangential_inplace( nx00, ny00, nz00, dst8[0][3], dst8[1][3], dst8[2][3] );
+            project_tangential_inplace( nx10, ny10, nz10, dst8[0][4], dst8[1][4], dst8[2][4] );
+            project_tangential_inplace( nx01, ny01, nz01, dst8[0][5], dst8[1][5], dst8[2][5] );
+            project_tangential_inplace( nx11, ny11, nz11, dst8[0][7], dst8[1][7], dst8[2][7] );
         }
 
-        // Add back normal correction: Ann_acc[c] * u_n[c] * n_c.
-        // u_n recomputed from original (unprojected) src in shared memory.
-        if ( !Diagonal && cmb_freeslip )
+        // Add back the normal-normal diagonal contribution removed by the test-side projection.
+        // This makes the fast path equivalent to the slow path for arbitrary input vectors.
+        // Not needed in diagonal mode: the rotated-frame diagonal already includes A_nn * u_n.
+        if ( !diagonal_ && ( cmb_freeslip || surf_freeslip ) )
         {
-            for ( int c = 0; c < 4; ++c )
-            {
-                const int    cn  = corner_node[c];
-                const double nx  = normals_sh( cn, 0 );
-                const double ny  = normals_sh( cn, 1 );
-                const double nz  = normals_sh( cn, 2 );
-                const double os0 = src_sh( cn, 0, lvl0 );
-                const double os1 = src_sh( cn, 1, lvl0 );
-                const double os2 = src_sh( cn, 2, lvl0 );
-                const double u_n_val = nx * os0 + ny * os1 + nz * os2;
-                const double corr    = Ann_acc_cmb[c] * u_n_val;
-                const int    u       = CMB_CORNER_TO_UNIQUE[c];
-                dst8[0][u] += corr * nx;
-                dst8[1][u] += corr * ny;
-                dst8[2][u] += corr * nz;
-            }
-        }
-        if ( !Diagonal && surf_freeslip )
-        {
-            for ( int c = 0; c < 4; ++c )
-            {
-                const int    cn  = corner_node[c];
-                const double nx  = normals_sh( cn, 0 );
-                const double ny  = normals_sh( cn, 1 );
-                const double nz  = normals_sh( cn, 2 );
-                const double os0 = src_sh( cn, 0, lvl0 + 1 );
-                const double os1 = src_sh( cn, 1, lvl0 + 1 );
-                const double os2 = src_sh( cn, 2, lvl0 + 1 );
-                const double u_n_val = nx * os0 + ny * os1 + nz * os2;
-                const double corr    = Ann_acc_surf[c] * u_n_val;
-                const int    u       = SURF_CORNER_TO_UNIQUE[c];
-                dst8[0][u] += corr * nx;
-                dst8[1][u] += corr * ny;
-                dst8[2][u] += corr * nz;
-            }
+            for ( int dim = 0; dim < 3; ++dim )
+                for ( int u = 0; u < 8; ++u )
+                    dst8[dim][u] += normal_corr[dim][u];
         }
 
-        // Scatter accumulated hex-cell contributions to global memory.
-#pragma unroll
         for ( int dim_add = 0; dim_add < 3; ++dim_add )
         {
             Kokkos::atomic_add( &dst_( local_subdomain_id, x_cell, y_cell, r_cell, dim_add ), dst8[dim_add][0] );
@@ -1715,8 +1697,6 @@ class EpsilonDivDivKerngen
             Kokkos::atomic_add(
                 &dst_( local_subdomain_id, x_cell + 1, y_cell + 1, r_cell + 1, dim_add ), dst8[dim_add][7] );
         }
-
-        } // end r_passes loop
     }
 
   public:
@@ -1738,36 +1718,23 @@ class EpsilonDivDivKerngen
         if ( tr >= r_tile_ )
             return;
 
+        const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell, CMB );
+        const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell + 1, SURFACE );
+
         if ( kernel_path_ == KernelPath::Slow )
         {
-            for ( int pass = 0; pass < r_passes_; ++pass )
-            {
-                const int r_cell_pass = r0 + pass * r_tile_ + tr;
-                if ( r_cell_pass >= hex_rad_ )
-                    break;
-                const bool at_cmb     = has_flag( local_subdomain_id, x_cell, y_cell, r_cell_pass, CMB );
-                const bool at_surface = has_flag( local_subdomain_id, x_cell, y_cell, r_cell_pass + 1, SURFACE );
-                operator_slow_path(
-                    team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell_pass, at_cmb, at_surface );
-            }
+            operator_slow_path(
+                team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell, at_cmb, at_surface );
         }
         else if ( kernel_path_ == KernelPath::FastFreeslip )
         {
-            if ( diagonal_ )
-                operator_fast_freeslip_path< true >(
-                    team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
-            else
-                operator_fast_freeslip_path< false >(
-                    team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
+            operator_fast_freeslip_path(
+                team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell, at_cmb, at_surface );
         }
         else
         {
-            if ( diagonal_ )
-                operator_fast_dirichlet_neumann_path< true >(
-                    team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
-            else
-                operator_fast_dirichlet_neumann_path< false >(
-                    team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell );
+            operator_fast_dirichlet_neumann_path(
+                team, local_subdomain_id, x0, y0, r0, tx, ty, tr, x_cell, y_cell, r_cell, at_cmb, at_surface );
         }
     }
 
@@ -1869,7 +1836,7 @@ class EpsilonDivDivKerngen
     }
 };
 
-static_assert( linalg::GCACapable< EpsilonDivDivKerngen< float > > );
-static_assert( linalg::GCACapable< EpsilonDivDivKerngen< double > > );
+static_assert( linalg::GCACapable< EpsilonDivDivKerngenV08ScalarCoalesced< float > > );
+static_assert( linalg::GCACapable< EpsilonDivDivKerngenV08ScalarCoalesced< double > > );
 
-} // namespace terra::fe::wedge::operators::shell
+} // namespace terra::fe::wedge::operators::shell::epsdivdiv_history

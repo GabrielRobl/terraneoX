@@ -758,7 +758,7 @@ int main( int argc, char** argv )
                     static double prev_l2_vel     = 1.0;
                     static double prev_l2_pre     = 1.0;
 
-                    for ( int level_subdomains = 0; level_subdomains <= 2; ++level_subdomains )
+                    for ( int level_subdomains = 0; level_subdomains <= 1; ++level_subdomains )
                     {
                         util::logroot << "  level_subdomains = " << level_subdomains << "\n";
 

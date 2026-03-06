@@ -44,13 +44,8 @@ void set_constant( const grid::Grid4DDataScalar< ScalarType >& x, ScalarType val
 template < typename ScalarType, int VecDim >
 void set_constant( const grid::Grid4DDataVec< ScalarType, VecDim >& x, ScalarType value )
 {
-    Kokkos::parallel_for(
-        "set_constant (Grid4DDataVec)",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ), x.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int subdomain, int i, int j, int k, int d ) { x( subdomain, i, j, k, d ) = value; } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        set_constant( x.comp_[d], value );
 }
 
 template < typename ScalarType >
@@ -120,18 +115,8 @@ void assign_masked_else_keep_old(
     const grid::Grid4DDataScalar< FlagType >&        mask_grid,
     const FlagType                                   mask_value )
 {
-    Kokkos::parallel_for(
-        "assign_masked",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 },
-            { dst.extent( 0 ), dst.extent( 1 ), dst.extent( 2 ), dst.extent( 3 ), dst.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d ) {
-            const ScalarType mask_val = util::has_flag( mask_grid( local_subdomain, i, j, k ), mask_value ) ? 1.0 : 0.0;
-            dst( local_subdomain, i, j, k, d ) =
-                mask_val * value + ( 1.0 - mask_val ) * dst( local_subdomain, i, j, k, d );
-        } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        assign_masked_else_keep_old( dst.comp_[d], value, mask_grid, mask_value );
 }
 
 template < typename ScalarType, int VecDim, util::FlagLike FlagType >
@@ -141,18 +126,8 @@ void assign_masked_else_keep_old(
     const grid::Grid4DDataScalar< FlagType >&        mask_grid,
     const FlagType                                   mask_value )
 {
-    Kokkos::parallel_for(
-        "assign_masked",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 },
-            { dst.extent( 0 ), dst.extent( 1 ), dst.extent( 2 ), dst.extent( 3 ), dst.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d ) {
-            const ScalarType mask_val = util::has_flag( mask_grid( local_subdomain, i, j, k ), mask_value ) ? 1.0 : 0.0;
-            dst( local_subdomain, i, j, k, d ) =
-                mask_val * src( local_subdomain, i, j, k, d ) + ( 1.0 - mask_val ) * dst( local_subdomain, i, j, k, d );
-        } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        assign_masked_else_keep_old( dst.comp_[d], src.comp_[d], mask_grid, mask_value );
 }
 
 template < typename ScalarType, int VecDim, util::FlagLike FlagType >
@@ -242,15 +217,8 @@ void lincomb(
     ScalarType                                       c_1,
     const grid::Grid4DDataVec< ScalarType, VecDim >& x_1 )
 {
-    Kokkos::parallel_for(
-        "lincomb 1 arg (Grid4DDataVec)",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ), y.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d ) {
-            y( local_subdomain, i, j, k, d ) = c_0 + c_1 * x_1( local_subdomain, i, j, k, d );
-        } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        lincomb( y.comp_[d], c_0, c_1, x_1.comp_[d] );
 }
 
 template < typename ScalarType, int VecDim >
@@ -262,16 +230,8 @@ void lincomb(
     ScalarType                                       c_2,
     const grid::Grid4DDataVec< ScalarType, VecDim >& x_2 )
 {
-    Kokkos::parallel_for(
-        "lincomb 2 args (Grid4DDataVec)",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ), y.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d ) {
-            y( local_subdomain, i, j, k, d ) =
-                c_0 + c_1 * x_1( local_subdomain, i, j, k, d ) + c_2 * x_2( local_subdomain, i, j, k, d );
-        } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        lincomb( y.comp_[d], c_0, c_1, x_1.comp_[d], c_2, x_2.comp_[d] );
 }
 
 template < typename ScalarType, int VecDim >
@@ -285,17 +245,8 @@ void lincomb(
     ScalarType                                       c_3,
     const grid::Grid4DDataVec< ScalarType, VecDim >& x_3 )
 {
-    Kokkos::parallel_for(
-        "lincomb 3 args (Grid4DDataVec)",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ), y.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d ) {
-            y( local_subdomain, i, j, k, d ) = c_0 + c_1 * x_1( local_subdomain, i, j, k, d ) +
-                                               c_2 * x_2( local_subdomain, i, j, k, d ) +
-                                               c_3 * x_3( local_subdomain, i, j, k, d );
-        } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        lincomb( y.comp_[d], c_0, c_1, x_1.comp_[d], c_2, x_2.comp_[d], c_3, x_3.comp_[d] );
 }
 
 template < typename ScalarType >
@@ -314,15 +265,8 @@ void invert_inplace( const grid::Grid4DDataScalar< ScalarType >& y )
 template < typename ScalarType, int VecDim >
 void invert_inplace( const grid::Grid4DDataVec< ScalarType, VecDim >& y )
 {
-    Kokkos::parallel_for(
-        "invert",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ), y.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d ) {
-            y( local_subdomain, i, j, k, d ) = 1.0 / y( local_subdomain, i, j, k, d );
-        } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        invert_inplace( y.comp_[d] );
 }
 
 template < typename ScalarType >
@@ -345,15 +289,8 @@ void mult_elementwise_inplace(
     const grid::Grid4DDataVec< ScalarType, VecDim >& y,
     const grid::Grid4DDataVec< ScalarType, VecDim >& x )
 {
-    Kokkos::parallel_for(
-        "mult_elementwise_inplace",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { y.extent( 0 ), y.extent( 1 ), y.extent( 2 ), y.extent( 3 ), y.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d ) {
-            y( local_subdomain, i, j, k, d ) *= x( local_subdomain, i, j, k, d );
-        } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        mult_elementwise_inplace( y.comp_[d], x.comp_[d] );
 }
 
 template < typename ScalarType >
@@ -420,20 +357,13 @@ template < typename ScalarType, int VecDim >
 ScalarType max_abs_entry( const grid::Grid4DDataVec< ScalarType, VecDim >& x )
 {
     ScalarType max_mag = 0.0;
-    Kokkos::parallel_reduce(
-        "max_abs_entry",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ), x.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d, ScalarType& local_max ) {
-            ScalarType val = Kokkos::abs( x( local_subdomain, i, j, k, d ) );
-            local_max      = Kokkos::max( local_max, val );
-        },
-        Kokkos::Max< ScalarType >( max_mag ) );
-
-    Kokkos::fence();
-
-    MPI_Allreduce( MPI_IN_PLACE, &max_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
-
+    for ( int d = 0; d < VecDim; ++d )
+    {
+        // max_abs_entry for scalar internally does MPI_Allreduce,
+        // so we call per-component and take the max on the host.
+        ScalarType comp_max = max_abs_entry( x.comp_[d] );
+        max_mag             = std::max( max_mag, comp_max );
+    }
     return max_mag;
 }
 
@@ -719,22 +649,12 @@ ScalarType masked_dot_product(
     const FlagType&                                  mask_value )
 {
     ScalarType dot_prod = 0.0;
-
-    Kokkos::parallel_reduce(
-        "masked_dot_product",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ), x.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d, ScalarType& local_dot_prod ) {
-            const ScalarType mask_val = util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) ? 1.0 : 0.0;
-            ScalarType       val      = x( local_subdomain, i, j, k, d ) * y( local_subdomain, i, j, k, d ) * mask_val;
-            local_dot_prod            = local_dot_prod + val;
-        },
-        Kokkos::Sum< ScalarType >( dot_prod ) );
-
-    Kokkos::fence( "masked_dot_product" );
-
-    MPI_Allreduce( MPI_IN_PLACE, &dot_prod, 1, mpi::mpi_datatype< ScalarType >(), MPI_SUM, MPI_COMM_WORLD );
-
+    for ( int d = 0; d < VecDim; ++d )
+    {
+        // masked_dot_product for scalar internally does MPI_Allreduce,
+        // so we accumulate the per-component results.
+        dot_prod += masked_dot_product( x.comp_[d], y.comp_[d], mask, mask_value );
+    }
     return dot_prod;
 }
 
@@ -762,23 +682,12 @@ bool has_nan_or_inf( const grid::Grid4DDataScalar< ScalarType >& x )
 template < typename ScalarType, int VecDim >
 bool has_nan_or_inf( const grid::Grid4DDataVec< ScalarType, VecDim >& x )
 {
-    bool has_nan_or_inf = false;
-
-    Kokkos::parallel_reduce(
-        "masked_dot_product",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ), x.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d, bool& local_has_nan_or_inf ) {
-            local_has_nan_or_inf = local_has_nan_or_inf || ( Kokkos::isnan( x( local_subdomain, i, j, k, d ) ) ||
-                                                             Kokkos::isinf( x( local_subdomain, i, j, k, d ) ) );
-        },
-        Kokkos::LOr< bool >( has_nan_or_inf ) );
-
-    Kokkos::fence();
-
-    MPI_Allreduce( MPI_IN_PLACE, &has_nan_or_inf, 1, mpi::mpi_datatype< bool >(), MPI_LOR, MPI_COMM_WORLD );
-
-    return has_nan_or_inf;
+    for ( int d = 0; d < VecDim; ++d )
+    {
+        if ( has_nan_or_inf( x.comp_[d] ) )
+            return true;
+    }
+    return false;
 }
 
 template < typename ScalarTypeDst, typename ScalarTypeSrc >
@@ -817,23 +726,8 @@ void rand( const grid::Grid4DDataScalar< ScalarTypeDst >& dst )
 template < typename ScalarTypeDst, int VecDim >
 void rand( const grid::Grid4DDataVec< ScalarTypeDst, VecDim >& dst )
 {
-    static_assert(
-        std::is_same_v< ScalarTypeDst, double > || std::is_same_v< ScalarTypeDst, float >,
-        "Random integers not implemented. But can be done easily below." );
-
-    Kokkos::Random_XorShift64_Pool<> random_pool( /*seed=*/12345 );
-    Kokkos::parallel_for(
-        "rand",
-        Kokkos::MDRangePolicy(
-            { 0, 0, 0, 0, 0 },
-            { dst.extent( 0 ), dst.extent( 1 ), dst.extent( 2 ), dst.extent( 3 ), dst.extent( 4 ) } ),
-        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, int d ) {
-            auto generator                     = random_pool.get_state();
-            dst( local_subdomain, i, j, k, d ) = static_cast< ScalarTypeDst >( generator.drand() );
-            random_pool.free_state( generator );
-        } );
-
-    Kokkos::fence();
+    for ( int d = 0; d < VecDim; ++d )
+        rand( dst.comp_[d] );
 }
 
 } // namespace terra::kernels::common

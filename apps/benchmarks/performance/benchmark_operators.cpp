@@ -2,7 +2,18 @@
 #include <kernels/common/grid_operations.hpp>
 
 #include "fe/wedge/operators/shell/epsilon_divdiv.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_simple.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_kerngen.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v01_initial.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v02_split_dimij.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v03_teams_precomp.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v04_shmem_coords.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v05_shmem_src_k.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v06_xy_tiling.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v07_split_paths.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v08_scalar_coalesced.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v09_separate_scatter.hpp"
+#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v10_seq_rpasses.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_stokes.hpp"
 #include "fe/wedge/operators/shell/laplace.hpp"
 #include "fe/wedge/operators/shell/laplace_simple.hpp"
@@ -23,7 +34,18 @@ using namespace terra;
 
 using fe::wedge::operators::shell::EpsDivDivStokes;
 using fe::wedge::operators::shell::EpsilonDivDiv;
+using fe::wedge::operators::shell::EpsilonDivDivSimple;
 using fe::wedge::operators::shell::EpsilonDivDivKerngen;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV01Initial;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV02SplitDimij;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV03TeamsPrecomp;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV04ShmemCoords;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV05ShmemSrcK;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV06XyTiling;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV07SplitPaths;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV08ScalarCoalesced;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV09SeparateScatter;
+using fe::wedge::operators::shell::epsdivdiv_history::EpsilonDivDivKerngenV10SeqRpasses;
 using fe::wedge::operators::shell::Laplace;
 using fe::wedge::operators::shell::LaplaceSimple;
 using fe::wedge::operators::shell::Stokes;
@@ -52,15 +74,37 @@ enum class BenchmarkType : int
     VectorLaplaceFloat,
     VectorLaplaceDouble,
     VectorLaplaceNeumannDouble,
+    EpsDivDivSimpleDouble,
     EpsDivDivFloat,
     EpsDivDivDouble,
     EpsDivDivKerngenDouble,
+    EpsDivDivKerngenV01Initial,
+    EpsDivDivKerngenV02SplitDimij,
+    EpsDivDivKerngenV03TeamsPrecomp,
+    EpsDivDivKerngenV04ShmemCoords,
+    EpsDivDivKerngenV05ShmemSrcK,
+    EpsDivDivKerngenV06XyTiling,
+    EpsDivDivKerngenV07SplitPaths,
+    EpsDivDivKerngenV08ScalarCoalesced,
+    EpsDivDivKerngenV09SeparateScatter,
+    EpsDivDivKerngenV10SeqRpasses,
     StokesDouble,
     EpsDivDivStokesDouble
 };
 
 constexpr auto all_benchmark_types = {
-    BenchmarkType::EpsDivDivKerngenDouble,
+    BenchmarkType::EpsDivDivSimpleDouble,
+    BenchmarkType::EpsDivDivDouble,
+    BenchmarkType::EpsDivDivKerngenV01Initial,
+    BenchmarkType::EpsDivDivKerngenV02SplitDimij,
+    BenchmarkType::EpsDivDivKerngenV03TeamsPrecomp,
+    BenchmarkType::EpsDivDivKerngenV04ShmemCoords,
+    BenchmarkType::EpsDivDivKerngenV05ShmemSrcK,
+    BenchmarkType::EpsDivDivKerngenV06XyTiling,
+    BenchmarkType::EpsDivDivKerngenV07SplitPaths,
+    BenchmarkType::EpsDivDivKerngenV08ScalarCoalesced,
+    BenchmarkType::EpsDivDivKerngenV09SeparateScatter,
+    BenchmarkType::EpsDivDivKerngenV10SeqRpasses,
 };
 
 const std::map< BenchmarkType, std::string > benchmark_description = {
@@ -70,9 +114,20 @@ const std::map< BenchmarkType, std::string > benchmark_description = {
     { BenchmarkType::VectorLaplaceFloat, "VectorLaplace (float)" },
     { BenchmarkType::VectorLaplaceDouble, "VectorLaplace (double)" },
     { BenchmarkType::VectorLaplaceNeumannDouble, "VectorLaplaceNeumann (double)" },
+    { BenchmarkType::EpsDivDivSimpleDouble, "EpsDivDivSimple (double, naive baseline)" },
     { BenchmarkType::EpsDivDivFloat, "EpsDivDiv (float)" },
-    { BenchmarkType::EpsDivDivDouble, "EpsDivDiv (double)" },
+    { BenchmarkType::EpsDivDivDouble, "EpsDivDiv (double, fused matvec)" },
     { BenchmarkType::EpsDivDivKerngenDouble, "EpsDivDivKerngen (double)" },
+    { BenchmarkType::EpsDivDivKerngenV01Initial, "v01 initial (1t/cell, 6qp, 3x3 dimij)" },
+    { BenchmarkType::EpsDivDivKerngenV02SplitDimij, "v02 split dimij (2x3 complexity)" },
+    { BenchmarkType::EpsDivDivKerngenV03TeamsPrecomp, "v03 teams + precomputation" },
+    { BenchmarkType::EpsDivDivKerngenV04ShmemCoords, "v04 shmem coords, collapsed qp" },
+    { BenchmarkType::EpsDivDivKerngenV05ShmemSrcK, "v05 shmem src + k dofs" },
+    { BenchmarkType::EpsDivDivKerngenV06XyTiling, "v06 xy tiling" },
+    { BenchmarkType::EpsDivDivKerngenV07SplitPaths, "v07 split fast/slow paths" },
+    { BenchmarkType::EpsDivDivKerngenV08ScalarCoalesced, "v08 scalar coalesced access" },
+    { BenchmarkType::EpsDivDivKerngenV09SeparateScatter, "v09 separate scatter (7.6 Gdofs)" },
+    { BenchmarkType::EpsDivDivKerngenV10SeqRpasses, "v10 seq r_passes (7.8 Gdofs)" },
     { BenchmarkType::StokesDouble, "Stokes (double)" },
     { BenchmarkType::EpsDivDivStokesDouble, "EpsDivDivStokes (double)" } };
 
@@ -197,7 +252,7 @@ BenchmarkData
     linalg::randomize( src_stokes_double );
     linalg::randomize( src_stokes_float );
     BoundaryConditions bcs = {
-        { CMB, FREESLIP },
+        { CMB, DIRICHLET },
         { SURFACE, DIRICHLET },
     };
     double duration = 0.0;
@@ -241,6 +296,14 @@ BenchmarkData
         duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
         dofs     = dofs_vec;
     }
+    else if ( benchmark == BenchmarkType::EpsDivDivSimpleDouble )
+    {
+        EpsilonDivDivSimple< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), true, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
     else if ( benchmark == BenchmarkType::EpsDivDivFloat )
     {
         EpsilonDivDiv A(
@@ -273,7 +336,87 @@ BenchmarkData
             coeff_double.grid_data(),
             bcs,
             false );
-        util::Timer t( "EpsDivDiv - double" );
+        util::Timer t( "EpsDivDivKerngen - double" );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV01Initial )
+    {
+        EpsilonDivDivKerngenV01Initial< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV02SplitDimij )
+    {
+        EpsilonDivDivKerngenV02SplitDimij< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV03TeamsPrecomp )
+    {
+        EpsilonDivDivKerngenV03TeamsPrecomp< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV04ShmemCoords )
+    {
+        EpsilonDivDivKerngenV04ShmemCoords< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV05ShmemSrcK )
+    {
+        EpsilonDivDivKerngenV05ShmemSrcK< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV06XyTiling )
+    {
+        EpsilonDivDivKerngenV06XyTiling< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV07SplitPaths )
+    {
+        EpsilonDivDivKerngenV07SplitPaths< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV08ScalarCoalesced )
+    {
+        EpsilonDivDivKerngenV08ScalarCoalesced< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV09SeparateScatter )
+    {
+        EpsilonDivDivKerngenV09SeparateScatter< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
+        duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
+        dofs     = dofs_vec;
+    }
+    else if ( benchmark == BenchmarkType::EpsDivDivKerngenV10SeqRpasses )
+    {
+        EpsilonDivDivKerngenV10SeqRpasses< double > A(
+            domain, coords_shell_double, coords_radii_double, boundary_mask_data,
+            coeff_double.grid_data(), bcs, false );
         duration = measure_run_time( executions, A, src_vec_double, dst_vec_double );
         dofs     = dofs_vec;
     }

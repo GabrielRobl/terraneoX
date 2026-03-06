@@ -5,6 +5,8 @@
 #include "../types.hpp"
 #include "dense/mat.hpp"
 
+#include <string>
+
 namespace terra::grid {
 
 using Layout = Kokkos::LayoutRight;
@@ -39,8 +41,133 @@ using Grid2DDataVec = Kokkos::View< ScalarType** [VecDim], Layout >;
 template < typename ScalarType, int VecDim >
 using Grid3DDataVec = Kokkos::View< ScalarType*** [VecDim], Layout >;
 
+/// @brief SoA (Structure-of-Arrays) 4D vector grid data.
+///
+/// Stores VecDim separate Grid4DDataScalar views for GPU memory coalescing.
+/// Provides the same `operator()(sd, x, y, r, d)` interface as the former
+/// AoS Kokkos::View<ScalarType****[VecDim]>.
 template < typename ScalarType, int VecDim >
-using Grid4DDataVec = Kokkos::View< ScalarType**** [VecDim], Layout >;
+struct Grid4DDataVec
+{
+    using value_type                  = ScalarType;
+    using memory_space                = typename Grid4DDataScalar< ScalarType >::memory_space;
+    static constexpr int vec_dim      = VecDim;
+    static constexpr int rank         = 5;
+
+    Grid4DDataScalar< ScalarType > comp_[VecDim];
+
+    Grid4DDataVec() = default;
+
+    Grid4DDataVec( const std::string& label, int s0, int s1, int s2, int s3 )
+    {
+        for ( int d = 0; d < VecDim; ++d )
+            comp_[d] = Grid4DDataScalar< ScalarType >(
+                label + "_d" + std::to_string( d ), s0, s1, s2, s3 );
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    ScalarType& operator()( int i0, int i1, int i2, int i3, int d ) const
+    {
+        return comp_[d]( i0, i1, i2, i3 );
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    auto extent( int i ) const
+    {
+        if ( i < 4 )
+            return comp_[0].extent( i );
+        return static_cast< decltype( comp_[0].extent( 0 ) ) >( VecDim );
+    }
+
+    /// @brief Get the label (derived from first component by stripping "_d0" suffix).
+    std::string label() const
+    {
+        std::string l   = comp_[0].label();
+        auto        pos = l.rfind( "_d0" );
+        return ( pos != std::string::npos ) ? l.substr( 0, pos ) : l;
+    }
+
+    /// @brief Host mirror type for I/O.
+    struct HostMirror
+    {
+        using value_type = ScalarType;
+        typename Grid4DDataScalar< ScalarType >::HostMirror comp_[VecDim];
+
+        ScalarType& operator()( int i0, int i1, int i2, int i3, int d )
+        {
+            return comp_[d]( i0, i1, i2, i3 );
+        }
+
+        const ScalarType& operator()( int i0, int i1, int i2, int i3, int d ) const
+        {
+            return comp_[d]( i0, i1, i2, i3 );
+        }
+
+        auto extent( int i ) const
+        {
+            if ( i < 4 )
+                return comp_[0].extent( i );
+            return static_cast< decltype( comp_[0].extent( 0 ) ) >( VecDim );
+        }
+    };
+};
+
+/// @brief Create a host mirror for Grid4DDataVec.
+template < typename ScalarType, int VecDim >
+typename Grid4DDataVec< ScalarType, VecDim >::HostMirror
+    create_mirror( Kokkos::HostSpace space, const Grid4DDataVec< ScalarType, VecDim >& src )
+{
+    typename Grid4DDataVec< ScalarType, VecDim >::HostMirror result;
+    for ( int d = 0; d < VecDim; ++d )
+        result.comp_[d] = Kokkos::create_mirror( space, src.comp_[d] );
+    return result;
+}
+
+/// @brief Create a host mirror for Grid4DDataScalar (delegates to Kokkos).
+template < typename ScalarType >
+typename Grid4DDataScalar< ScalarType >::HostMirror
+    create_mirror( Kokkos::HostSpace space, const Grid4DDataScalar< ScalarType >& src )
+{
+    return Kokkos::create_mirror( space, src );
+}
+
+/// @brief Deep copy from device Grid4DDataVec to host mirror.
+template < typename ScalarType, int VecDim >
+void deep_copy(
+    typename Grid4DDataVec< ScalarType, VecDim >::HostMirror& dst,
+    const Grid4DDataVec< ScalarType, VecDim >&                src )
+{
+    for ( int d = 0; d < VecDim; ++d )
+        Kokkos::deep_copy( dst.comp_[d], src.comp_[d] );
+}
+
+/// @brief Deep copy from host mirror to device Grid4DDataVec.
+template < typename ScalarType, int VecDim >
+void deep_copy(
+    Grid4DDataVec< ScalarType, VecDim >&                             dst,
+    const typename Grid4DDataVec< ScalarType, VecDim >::HostMirror&  src )
+{
+    for ( int d = 0; d < VecDim; ++d )
+        Kokkos::deep_copy( dst.comp_[d], src.comp_[d] );
+}
+
+/// @brief Deep copy for Grid4DDataScalar host mirror to device (delegates to Kokkos).
+template < typename ScalarType >
+void deep_copy(
+    Grid4DDataScalar< ScalarType >&                                  dst,
+    const typename Grid4DDataScalar< ScalarType >::HostMirror&       src )
+{
+    Kokkos::deep_copy( dst, src );
+}
+
+/// @brief Deep copy for Grid4DDataScalar device to host mirror (delegates to Kokkos).
+template < typename ScalarType >
+void deep_copy(
+    typename Grid4DDataScalar< ScalarType >::HostMirror&  dst,
+    const Grid4DDataScalar< ScalarType >&                 src )
+{
+    Kokkos::deep_copy( dst, src );
+}
 
 template < typename ScalarType, int Rows, int Cols, int NumMatrices >
 using Grid4DDataMatrices = Kokkos::View< dense::Mat< ScalarType, Rows, Cols >****[NumMatrices], Layout >;

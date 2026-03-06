@@ -119,7 +119,6 @@ constexpr bool is_kokkos_view_v = is_kokkos_view<std::decay_t<V>>::value;
 template < int VecDim, typename BufferView, typename ViewType >
 std::enable_if_t<
     detail_view_constraints::is_kokkos_view_v<BufferView> &&
-    detail_view_constraints::is_kokkos_view_v<ViewType> &&
     (std::decay_t<BufferView>::rank == 1)
 >
 copy_to_buffer(
@@ -166,7 +165,6 @@ copy_to_buffer(
 template < int VecDim, typename BufferView, typename ViewType >
 std::enable_if_t<
     detail_view_constraints::is_kokkos_view_v<BufferView> &&
-    detail_view_constraints::is_kokkos_view_v<ViewType> &&
     (std::decay_t<BufferView>::rank == 2)
 >
 copy_to_buffer(
@@ -212,7 +210,6 @@ copy_to_buffer(
 template < int VecDim, typename BufferView, typename ViewType >
 std::enable_if_t<
     detail_view_constraints::is_kokkos_view_v<BufferView> &&
-    detail_view_constraints::is_kokkos_view_v<ViewType> &&
     (std::decay_t<BufferView>::rank == 3)
 >
 copy_to_buffer(
