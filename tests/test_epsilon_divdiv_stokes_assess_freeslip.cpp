@@ -2,8 +2,8 @@
 // Stokes convergence test using analytical spherical-harmonic solutions from the
 // "assess" package (Analytical Solutions for the Stokes Equations in Spherical Shells).
 //
-// Solution: SphericalStokesSolutionSmoothZeroSlip(l=2, m=2, k=2, Rp=1.0, Rm=0.5, nu=1.0, g=1.0)
-//   - Dirichlet (zero-slip) BCs on both CMB and surface
+// Solution: SphericalStokesSolutionSmoothFreeZeroSlip(l=2, m=2, k=2, Rp=1.0, Rm=0.5, nu=1.0, g=1.0)
+//   - Free-slip BC at CMB (Rm=0.5), Dirichlet (zero-slip) BC at surface (Rp=1.0)
 //   - Constant viscosity nu = 1
 //   - Smooth r^k forcing: f = -g (r/Rp)^k Y_lm(theta,phi) r_hat
 //
@@ -94,8 +94,9 @@ using linalg::solvers::TwoGridGCA;
 using terra::grid::shell::BoundaryConditions;
 
 // =============================================================================
-// Assess analytical solution: SphericalStokesSolutionSmoothZeroSlip
+// Assess analytical solution: SphericalStokesSolutionSmoothFreeZeroSlip
 //   l=2, m=2, k_forcing=2, Rp=1.0, Rm=0.5, nu=1.0, g=1.0
+//   Free-slip at Rm (CMB), zero-slip at Rp (surface)
 // =============================================================================
 
 namespace assess_solution
@@ -103,15 +104,15 @@ namespace assess_solution
 
 // Poloidal coefficients: Pl(r) = A*r^l + B*r^(-l-1) + C*r^(l+2) + D*r^(-l+1) + E*r^(k+3)
 // With l=2, k=2: Pl(r) = A*r^2 + B*r^-3 + C*r^4 + D*r^-1 + E*r^5
-constexpr double coeff_A =  5.08347602739726064230e-03;
-constexpr double coeff_B =  9.81021689497716840520e-05;
-constexpr double coeff_C = -1.13441780821917810596e-02;
-constexpr double coeff_D = -7.81844558599695542596e-04;
+constexpr double coeff_A =  4.54414476717381228543e-03;
+constexpr double coeff_B =  3.74596588289534304281e-05;
+constexpr double coeff_C = -1.10448363301060385744e-02;
+constexpr double coeff_D = -4.81212540341170963258e-04;
 constexpr double coeff_E =  6.94444444444444405895e-03;
 
 // Pressure coefficients: p(r,θ,φ) = (G*r^l + H*r^(-l-1) + K*r^(k+1)) * Y_22
-constexpr double coeff_G =  4.76455479452054797562e-01;
-constexpr double coeff_H =  9.38213470319634694483e-03;
+constexpr double coeff_G =  4.63883125864453627063e-01;
+constexpr double coeff_H =  5.77455048409405112542e-03;
 constexpr double coeff_K = -6.66666666666666629659e-01;
 
 constexpr int    l_deg      = 2;
@@ -468,7 +469,7 @@ test( int    min_level,
         kernels::common::count_masked< long >( mask_data[num_levels - 2], grid::NodeOwnershipFlag::OWNED );
 
     BoundaryConditions bcs = {
-        { CMB, DIRICHLET },
+        { CMB, FREESLIP },
         { SURFACE, DIRICHLET },
     };
     BoundaryConditions bcs_neumann = {
@@ -597,25 +598,12 @@ test( int    min_level,
 
     linalg::apply( M, stok_vecs["tmp_1"].block_1(), stok_vecs["f"].block_1() );
 
-    // Boundary interpolation (Dirichlet)
-    Kokkos::parallel_for(
-        "assess boundary interpolation (velocity)",
-        local_domain_md_range_policy_nodes( domains[velocity_level] ),
-        AssessSolutionVelocityInterpolator(
-            coords_shell[velocity_level],
-            coords_radii[velocity_level],
-            stok_vecs["tmp_0"].block_1().grid_data(),
-            boundary_mask_data[velocity_level],
-            true ) );
-
-    fe::strong_algebraic_velocity_dirichlet_enforcement_stokes_like(
-        K_neumann,
-        K_neumann_diag,
-        stok_vecs["tmp_0"],
-        stok_vecs["tmp_1"],
-        stok_vecs["f"],
-        boundary_mask_data[velocity_level],
-        BOUNDARY );
+    // Homogeneous boundary enforcement: zero all velocity RHS at all boundary nodes.
+    // The FREESLIP flag in the operator handles the free-slip condition at CMB.
+    // The DIRICHLET flag handles the zero-slip condition at SURFACE.
+    // (Same approach as mantlecirculation app.)
+    fe::strong_algebraic_homogeneous_velocity_dirichlet_enforcement_stokes_like(
+        stok_vecs["f"], boundary_mask_data[velocity_level], BOUNDARY );
 
     using Smoother = linalg::solvers::Chebyshev< Viscous >;
 
@@ -808,7 +796,7 @@ int main( int argc, char** argv )
 
     for ( int minlevel = 2; minlevel <= 2; ++minlevel )
     {
-        util::logroot << "=== Assess Stokes test (l=2, m=2, k=2, ZeroSlip) ===\n";
+        util::logroot << "=== Assess Stokes test (l=2, m=2, k=2, FreeZeroSlip) ===\n";
         util::logroot << "minlevel = " << minlevel << "\n";
 
         err_vel.clear();
