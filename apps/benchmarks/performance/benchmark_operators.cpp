@@ -4,16 +4,16 @@
 #include "fe/wedge/operators/shell/epsilon_divdiv.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_simple.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_kerngen.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v01_initial.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v02_split_dimij.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v03_teams_precomp.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v04_shmem_coords.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v05_shmem_src_k.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v06_xy_tiling.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v07_split_paths.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v08_scalar_coalesced.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v09_separate_scatter.hpp"
-#include "fe/wedge/operators/shell/epsilon_divdiv_kerngen_v10_seq_rpasses.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v01_initial.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v02_split_dimij.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v03_teams_precomp.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v04_shmem_coords.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v05_shmem_src_k.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v06_xy_tiling.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v07_split_paths.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v08_scalar_coalesced.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v09_separate_scatter.hpp"
+#include "fe/wedge/operators/shell/performance_history/epsilon_divdiv_kerngen_v10_seq_rpasses.hpp"
 #include "fe/wedge/operators/shell/epsilon_divdiv_stokes.hpp"
 #include "fe/wedge/operators/shell/laplace.hpp"
 #include "fe/wedge/operators/shell/laplace_simple.hpp"
@@ -93,18 +93,11 @@ enum class BenchmarkType : int
 };
 
 constexpr auto all_benchmark_types = {
-    BenchmarkType::EpsDivDivSimpleDouble,
-    BenchmarkType::EpsDivDivDouble,
-    BenchmarkType::EpsDivDivKerngenV01Initial,
-    BenchmarkType::EpsDivDivKerngenV02SplitDimij,
-    BenchmarkType::EpsDivDivKerngenV03TeamsPrecomp,
-    BenchmarkType::EpsDivDivKerngenV04ShmemCoords,
-    BenchmarkType::EpsDivDivKerngenV05ShmemSrcK,
-    BenchmarkType::EpsDivDivKerngenV06XyTiling,
     BenchmarkType::EpsDivDivKerngenV07SplitPaths,
     BenchmarkType::EpsDivDivKerngenV08ScalarCoalesced,
     BenchmarkType::EpsDivDivKerngenV09SeparateScatter,
     BenchmarkType::EpsDivDivKerngenV10SeqRpasses,
+    BenchmarkType::EpsDivDivKerngenDouble,
 };
 
 const std::map< BenchmarkType, std::string > benchmark_description = {

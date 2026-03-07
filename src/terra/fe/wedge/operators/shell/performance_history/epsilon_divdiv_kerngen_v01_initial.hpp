@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../quadrature/quadrature.hpp"
+#include "../../../quadrature/quadrature.hpp"
 #include "communication/shell/communication.hpp"
 #include "dense/vec.hpp"
 #include "fe/wedge/integrands.hpp"
