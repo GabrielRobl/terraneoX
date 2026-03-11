@@ -30,6 +30,7 @@
       <tab type="user" url="@ref flag-fields-and-masks" visible="yes" title="Flag Fields and Masks" intro=""/>
       <tab type="user" url="@ref boundary-conditions" visible="yes" title="Boundary Conditions" intro=""/>
       <tab type="user" url="@ref input-output" visible="yes" title="Input-Output" intro=""/>
+      <tab type="user" url="@ref mcm-app" visible="yes" title="Mantle Circulation App" intro=""/>
     </tab>
 
     <tab type="user" url="@ref contributing" visible="yes" title="Contributing"/>

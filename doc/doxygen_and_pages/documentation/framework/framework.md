@@ -14,3 +14,4 @@ Below is a list of the documentation pages for the framework introducing various
 | [Flag Fields and Masks](#flag-fields-and-masks)      | Use of masks and flag grids for selective operations and boundary tagging.             |
 | [Boundary Conditions](#boundary-conditions)          | Definition and application of boundary conditions.                                     |
 | [Input and Output](#input-output)                    | Data formats, visualization, radial profiles, checkpoints, logging, etc.               |
+| [Mantle circulation app](#mcm-app)                   | Details on the mantle circulation app.                                                 |
