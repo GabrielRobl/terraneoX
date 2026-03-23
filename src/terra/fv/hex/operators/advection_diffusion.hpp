@@ -1,5 +1,6 @@
 
 #pragma once
+#include "communication/shell/fv_communication.hpp"
 #include "fe/triangle/quadrature/quadrature.hpp"
 #include "fe/wedge/integrands.hpp"
 #include "fe/wedge/kernel_helpers.hpp"
@@ -32,6 +33,9 @@ class UnsteadyAdvectionDiffusion
     ScalarT diffusivity_;
     ScalarT dt_;
 
+    /// Pre-allocated send/recv buffers for ghost layer communication (built once in ctor).
+    communication::shell::FVGhostLayerBuffers< ScalarType > ghost_bufs_;
+
     grid::Grid4DDataScalar< ScalarType >                      src_;
     grid::Grid4DDataScalar< ScalarType >                      dst_;
     grid::Grid4DDataVec< ScalarType, num_velocity_components > vel_grid_;
@@ -54,6 +58,7 @@ class UnsteadyAdvectionDiffusion
     , velocity_( velocity )
     , diffusivity_( diffusivity )
     , dt_( dt )
+    , ghost_bufs_( domain )
     {}
 
     ScalarT&       dt() { return dt_; }
@@ -61,7 +66,9 @@ class UnsteadyAdvectionDiffusion
 
     void apply_impl( const SrcVectorType& src, DstVectorType& dst )
     {
-        // TODO: communicate ghost layers
+        // Fill ghost layers so that stencil reads at ±1 offsets see up-to-date neighbour values.
+        // Uses pre-allocated buffers — no heap allocation on this hot path.
+        communication::shell::update_fv_ghost_layers( domain_, src.grid_data(), ghost_bufs_ );
 
         src_      = src.grid_data();
         dst_      = dst.grid_data();
