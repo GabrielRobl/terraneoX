@@ -2,11 +2,13 @@
 #pragma once
 
 #include "communication/shell/fv_communication.hpp"
+#include "fv/hex/helpers.hpp"
 #include "fv/hex/operators/geometry_helper.hpp"
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
 #include "linalg/vector_fv.hpp"
 #include "linalg/vector_q1.hpp"
+#include "mpi/mpi.hpp"
 #include "util/timer.hpp"
 
 namespace terra::fv::hex::operators {
@@ -77,6 +79,136 @@ template < typename ScalarT >
 using GeometryHelper = operators::detail::GeometryHelper< ScalarT >;
 
 } // namespace fct_detail
+
+// ============================================================================
+// Stable timestep computation
+// ============================================================================
+
+/// @brief Kokkos kernel that computes the local maximum stable explicit dt for each FV cell.
+///
+/// The low-order predictor \f$T^L_i\f$ is stable if and only if
+/// \f[
+///     \frac{\Delta t}{M_{ii}}\,\lambda_i \leq 1, \qquad
+///     \lambda_i = \sum_{j:\,\beta_{ij}<0} |\beta_{ij}|
+///                 + \sum_j \kappa\,\frac{|\mathbf{S}_{f,j}|^2}
+///                                       {(\mathbf{x}_j-\mathbf{x}_i)\cdot\mathbf{S}_{f,j}}
+/// \f]
+/// (assumes `subtract_divergence = true`; the formula naturally coincides with the advective
+/// stability limit \f$\sum_{j:\,\beta>0}\beta_{ij}\f$ for exactly divergence-free fields.)
+///
+/// For each cell the kernel outputs \f$M_{ii}/\lambda_i\f$ (a time scale), so the global
+/// minimum is the largest dt that satisfies the stability criterion everywhere.
+///
+/// This accounts for:
+///   - Lateral face fluxes on irregular/small cells near pentagon vertices of the icosahedral
+///     grid — these are missed by the simpler \f$h_\text{min,radial}/u_\text{max}\f$ estimate.
+///   - Non-orthogonal diffusion stencils, where \f$|\mathbf{S}_f|^2/(\mathbf{dx}\cdot\mathbf{S}_f)\f$
+///     can be much larger than \f$1/h^2\f$.
+template < typename ScalarT >
+struct ComputeDtStableKernel
+{
+    using ScalarType = ScalarT;
+    using Vec3       = dense::Vec< ScalarT, 3 >;
+    using GH         = fct_detail::GeometryHelper< ScalarT >;
+
+    static constexpr int num_neighbors = GH::num_neighbors;
+
+    grid::Grid3DDataVec< ScalarT, 3 > grid_;
+    grid::Grid2DDataScalar< ScalarT > radii_;
+    grid::Grid4DDataVec< ScalarT, 3 > cell_centers_;
+    grid::Grid4DDataVec< ScalarT, 3 > vel_grid_;
+    ScalarT                           diffusivity_;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()( const int id, const int x, const int y, const int r, ScalarT& local_min ) const
+    {
+        ScalarT beta[num_neighbors];
+        ScalarT M_ii = ScalarT( 0 );
+        Vec3    S_f[num_neighbors];
+        GH::compute_geometry( grid_, radii_, cell_centers_, vel_grid_, id, x, y, r, beta, M_ii, S_f );
+
+        // Effective diagonal of the low-order predictor (subtract_divergence = true):
+        //   lambda_i = -sum_{beta<0} beta_ij  +  sum_j kappa * |S_f|^2 / (dx . S_f)
+        // For divergence-free velocity: this equals sum_{beta>0} beta_ij.
+        ScalarT lambda = ScalarT( 0 );
+
+        for ( int n = 0; n < num_neighbors; ++n )
+        {
+            if ( beta[n] < ScalarT( 0 ) )
+                lambda -= beta[n]; // accumulate inflow (beta<0 => outflow from neighbour, inflow to i)
+
+            if ( diffusivity_ > ScalarT( 0 ) )
+            {
+                const int   nx = x + GH::cell_offset_x[n];
+                const int   ny = y + GH::cell_offset_y[n];
+                const int   nr = r + GH::cell_offset_r[n];
+                const Vec3  dx{
+                    cell_centers_( id, nx, ny, nr, 0 ) - cell_centers_( id, x, y, r, 0 ),
+                    cell_centers_( id, nx, ny, nr, 1 ) - cell_centers_( id, x, y, r, 1 ),
+                    cell_centers_( id, nx, ny, nr, 2 ) - cell_centers_( id, x, y, r, 2 ) };
+                const ScalarT denom = dx.dot( S_f[n] );
+                if ( denom > ScalarT( 0 ) )
+                    lambda += diffusivity_ * S_f[n].dot( S_f[n] ) / denom;
+            }
+        }
+
+        const ScalarT dt_cell = ( lambda > ScalarT( 0 ) ) ? ( M_ii / lambda ) : ScalarT( 1e30 );
+        local_min = Kokkos::min( local_min, dt_cell );
+    }
+};
+
+/// @brief Compute the largest explicit time step that keeps the FCT low-order predictor stable.
+///
+/// Performs a Kokkos parallel reduction over all non-ghost FV cells followed by an
+/// MPI_Allreduce to obtain the global minimum across all MPI ranks.
+///
+/// The result is exact (derived from the actual face-normal velocity fluxes and cell volumes),
+/// unlike the approximate estimate \f$h_\text{min,radial} / u_\text{max}\f$ which ignores
+/// lateral cell sizes and diffusion stiffness on non-orthogonal cells.
+///
+/// **Typical usage:**
+/// @code
+///   const ScalarType dt = pseudo_cfl * fv::hex::operators::compute_dt_stable(
+///       domain, u, cell_centers.grid_data(), coords_shell, coords_radii, diffusivity);
+/// @endcode
+///
+/// @param domain       Distributed domain.
+/// @param vel          Q1 nodal velocity (read-only; no ghost-layer update required).
+/// @param cell_centers Pre-computed cell centres with ghost layers (from `initialize_cell_centers`).
+/// @param grid         Lateral node coordinates of the unit-sphere surface.
+/// @param radii        Radial shell radii.
+/// @param diffusivity  Physical diffusivity \f$\kappa\f$ (default 0 = pure advection).
+/// @returns The minimum over all cells of \f$M_{ii}/\lambda_i\f$.
+template < typename ScalarT >
+ScalarT compute_dt_stable(
+    const grid::shell::DistributedDomain&    domain,
+    const linalg::VectorQ1Vec< ScalarT, 3 >& vel,
+    const grid::Grid4DDataVec< ScalarT, 3 >& cell_centers,
+    const grid::Grid3DDataVec< ScalarT, 3 >& grid,
+    const grid::Grid2DDataScalar< ScalarT >& radii,
+    const ScalarT                            diffusivity = ScalarT( 0 ) )
+{
+    ScalarT local_min;
+
+    Kokkos::parallel_reduce(
+        "compute_dt_stable",
+        grid::shell::local_domain_md_range_policy_cells_fv_skip_ghost_layers( domain ),
+        ComputeDtStableKernel< ScalarT >{
+            .grid_         = grid,
+            .radii_        = radii,
+            .cell_centers_ = cell_centers,
+            .vel_grid_     = vel.grid_data(),
+            .diffusivity_  = diffusivity,
+        },
+        Kokkos::Min< ScalarT >( local_min ) );
+
+    Kokkos::fence();
+
+    ScalarT global_min = local_min;
+    MPI_Allreduce( &local_min, &global_min, 1, mpi::mpi_datatype< ScalarT >(), MPI_MIN, MPI_COMM_WORLD );
+
+    return global_min;
+}
 
 // ============================================================================
 // Stage 1: Predictor — low-order upwind + antidiffusive fluxes
@@ -565,22 +697,38 @@ void fct_correction(
 /// @param diffusivity          Physical diffusivity \f$\kappa \geq 0\f$ (default 0 = pure advection).
 /// @param source               Volumetric source term \f$f\f$ [T/time]; null view = no source.
 /// @param subtract_divergence  Subtract discrete divergence error (default `true`); see `fct_predictor`.
+/// @param boundary_mask        Node-based boundary flag array (Q1 layout).  When provided (non-null),
+///                             Dirichlet BCs are enforced on \f$T^L\f$ **between the predictor and
+///                             limiter** so the Zalesak \f$R^\pm\f$ factors see the correct boundary
+///                             values.  Default: null (no enforcement).
+/// @param bcs                  Prescribed boundary values.  Ignored when `boundary_mask` is null.
 template < typename ScalarT >
 void fct_explicit_step(
-    const grid::shell::DistributedDomain&    domain,
-    linalg::VectorFVScalar< ScalarT >&       T,
-    const linalg::VectorQ1Vec< ScalarT, 3 >& vel,
-    const grid::Grid4DDataVec< ScalarT, 3 >& cell_centers,
-    const grid::Grid3DDataVec< ScalarT, 3 >& grid,
-    const grid::Grid2DDataScalar< ScalarT >& radii,
-    const ScalarT                            dt,
-    FVFCTBuffers< ScalarT >&                 bufs,
-    const ScalarT                            diffusivity         = ScalarT( 0 ),
-    const grid::Grid4DDataScalar< ScalarT >& source              = {},
-    const bool                               subtract_divergence = true )
+    const grid::shell::DistributedDomain&                           domain,
+    linalg::VectorFVScalar< ScalarT >&                              T,
+    const linalg::VectorQ1Vec< ScalarT, 3 >&                        vel,
+    const grid::Grid4DDataVec< ScalarT, 3 >&                        cell_centers,
+    const grid::Grid3DDataVec< ScalarT, 3 >&                        grid,
+    const grid::Grid2DDataScalar< ScalarT >&                        radii,
+    const ScalarT                                                   dt,
+    FVFCTBuffers< ScalarT >&                                        bufs,
+    const ScalarT                                                   diffusivity         = ScalarT( 0 ),
+    const grid::Grid4DDataScalar< ScalarT >&                        source              = {},
+    const bool                                                      subtract_divergence = true,
+    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask       = {},
+    const DirichletBCs< ScalarT >&                                  bcs                 = {} )
 {
     util::Timer timer_fct( "fct_explicit_step" );
-    fct_predictor ( domain, T, vel, cell_centers, grid, radii, dt, bufs, diffusivity, source, subtract_divergence );
+    fct_predictor( domain, T, vel, cell_centers, grid, radii, dt, bufs, diffusivity, source, subtract_divergence );
+
+    // Enforce Dirichlet BCs on T_L before the limiter so that R+/R- are computed
+    // relative to the correct boundary values.  Without this, the predictor can
+    // move boundary cells away from the prescribed value (due to discrete divergence
+    // error in the velocity), and the antidiffusive correction will then "confirm"
+    // that wrong value — leading to oscillations near the boundary.
+    if ( boundary_mask.extent( 0 ) > 0 )
+        apply_dirichlet_bcs( bufs.T_L, boundary_mask, bcs, domain );
+
     fct_limiter   ( domain, bufs );
     fct_correction( domain, T, bufs );
 }

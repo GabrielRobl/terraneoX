@@ -814,6 +814,22 @@ Result<> run( const Parameters& prm )
         FVNoiseAdder{ T_fct.grid_data(), Kokkos::Random_XorShift64_Pool<>( 12345 ) } );
 
     Kokkos::fence();
+
+    // Enforce Dirichlet BCs on the initial FV field.  This must happen before
+    // update_fv_ghost_layers so that the radial ghost cells at the physical
+    // boundaries (CMB r=0, surface r=N) are set to the correct BC values.
+    // update_fv_ghost_layers does not touch those ghost cells (no subdomain
+    // neighbour exists beyond a physical boundary).
+    fv::hex::apply_dirichlet_bcs(
+        T_fct,
+        boundary_mask_data[velocity_level],
+        fv::hex::DirichletBCs< ScalarType >{
+            .T_cmb         = static_cast< ScalarType >( 1 ),
+            .T_surface     = static_cast< ScalarType >( 0 ),
+            .apply_cmb     = true,
+            .apply_surface = true },
+        domains[velocity_level] );
+
     communication::shell::update_fv_ghost_layers( domains[velocity_level], T_fct.grid_data() );
 
     // Project T_fct to Q1 T via L2 projection for use as Stokes RHS and output.
@@ -1029,24 +1045,31 @@ Result<> run( const Parameters& prm )
 
         logroot << "Setting up energy solve ..." << std::endl;
 
-        // Max velocity magnitude.
-        const auto max_vel = kernels::common::max_vector_magnitude( u.block_1().grid_data() );
-
-        // Choose "suitable" small dt for accuracy - we have and implicit time-stepping scheme so we do not really need
-        // a CFL in the classical sense. Still useful for time-step size restriction.
-        const auto dt_advection = h / max_vel;
-        // const auto dt_diffusion = ( h * h ) / prm.diffusivity;
-        // const auto dt           = prm.pseudo_cfl * std::min( dt_advection, dt_diffusion );
-        const auto dt = prm.time_stepping_parameters.pseudo_cfl * dt_advection;
-
-        logroot << "Computing dt ..." << std::endl;
-        logroot << "    max_vel: " << max_vel << std::endl;
-        logroot << "    h:       " << h << std::endl;
-        logroot << "=>  dt:      " << dt << std::endl;
-
 #ifdef USE_FCT_ENERGY
+        // Reusable BC descriptor used inside fct_explicit_step (for T_L) and after each substep.
+        const fv::hex::DirichletBCs< ScalarType > fct_bcs{
+            .T_cmb         = static_cast< ScalarType >( 1 ),
+            .T_surface     = static_cast< ScalarType >( 0 ),
+            .apply_cmb     = true,
+            .apply_surface = true };
         // --- FCT explicit time-stepping ---
-        // Note: FCT is explicit; pseudo_cfl must be < 1 for stability (CFL < 1).
+        // Compute the exact stable dt from the actual face-normal velocity fluxes and cell
+        // volumes via a parallel reduce over all cells.  This is more accurate than the
+        // h_min / u_max estimate, which ignores smaller lateral cells near pentagon vertices
+        // of the icosahedral grid and diffusion stiffness on non-orthogonal faces.
+        const auto dt_stable = fv::hex::operators::compute_dt_stable(
+            domains[velocity_level],
+            u.block_1(),
+            fv_cell_centers.grid_data(),
+            coords_shell[velocity_level],
+            coords_radii[velocity_level],
+            prm.physics_parameters.diffusivity );
+        const auto dt = prm.time_stepping_parameters.pseudo_cfl * dt_stable;
+
+        logroot << "Computing dt (FCT stable) ..." << std::endl;
+        logroot << "    dt_stable: " << dt_stable << std::endl;
+        logroot << "=>  dt:        " << dt << std::endl;
+
         {
             util::Timer timer_fct_substeps( "fct_substeps" );
 
@@ -1065,19 +1088,19 @@ Result<> run( const Parameters& prm )
                         coords_radii[velocity_level],
                         dt,
                         fv_fct_bufs,
-                        prm.physics_parameters.diffusivity );
+                        prm.physics_parameters.diffusivity,
+                        /*source=*/{},
+                        /*subtract_divergence=*/true,
+                        boundary_mask_data[velocity_level],
+                        fct_bcs );
                     timer_fct_step.stop();
                 }
 
-                // Enforce Dirichlet boundary conditions.
+                // Enforce Dirichlet BCs on T^{n+1} after the full FCT step.
                 fv::hex::apply_dirichlet_bcs(
                     T_fct,
                     boundary_mask_data[velocity_level],
-                    fv::hex::DirichletBCs< ScalarType >{
-                        .T_cmb         = static_cast< ScalarType >( 1 ),
-                        .T_surface     = static_cast< ScalarType >( 0 ),
-                        .apply_cmb     = true,
-                        .apply_surface = true },
+                    fct_bcs,
                     domains[velocity_level] );
             }
 
@@ -1097,6 +1120,15 @@ Result<> run( const Parameters& prm )
 
 #else
         // --- SUPG implicit time-stepping ---
+        const auto max_vel      = kernels::common::max_vector_magnitude( u.block_1().grid_data() );
+        const auto dt_advection = h / max_vel;
+        const auto dt           = prm.time_stepping_parameters.pseudo_cfl * dt_advection;
+
+        logroot << "Computing dt ..." << std::endl;
+        logroot << "    max_vel: " << max_vel << std::endl;
+        logroot << "    h:       " << h << std::endl;
+        logroot << "=>  dt:      " << dt << std::endl;
+
         A.dt()              = dt;
         A_neumann.dt()      = dt;
         A_neumann_diag.dt() = dt;

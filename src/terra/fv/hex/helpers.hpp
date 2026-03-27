@@ -53,6 +53,51 @@ struct DirichletBCs
 /// @param boundary_mask Node-based boundary flag array (Q1 layout, CMB at r=0, SURFACE at r=last).
 /// @param bcs           Prescribed BC values and flags.
 /// @param domain        Distributed domain (used for the loop range policy).
+/// @brief Apply Dirichlet BCs directly to a raw FV grid view.
+///
+/// Sets both the real boundary cell and the adjacent ghost cell outside the physical domain.
+/// The ghost cell is never filled by `update_fv_ghost_layers` (no subdomain neighbour exists
+/// beyond a physical boundary) so it must be set here to give the correct inflow/diffusion
+/// BC when FCT predictor stencils read across the boundary face.
+///
+/// This overload is the low-level implementation; the `VectorFVScalar` overload delegates to it.
+/// It can also be called directly on intermediate FCT buffers (e.g. `T_L`) that are raw views.
+template < typename ScalarT >
+void apply_dirichlet_bcs(
+    grid::Grid4DDataScalar< ScalarT >                               data,
+    const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
+    const DirichletBCs< ScalarT >&                                  bcs,
+    const grid::shell::DistributedDomain&                           domain )
+{
+    using Flag = grid::shell::ShellBoundaryFlag;
+
+    const int fv_r_last   = static_cast< int >( data.extent( 3 ) ) - 2;
+    const int mask_r_last = static_cast< int >( boundary_mask.extent( 3 ) ) - 1;
+
+    const ScalarT T_cmb   = bcs.T_cmb;
+    const ScalarT T_surf  = bcs.T_surface;
+    const bool    do_cmb  = bcs.apply_cmb;
+    const bool    do_surf = bcs.apply_surface;
+
+    Kokkos::parallel_for(
+        "apply_dirichlet_bcs",
+        grid::shell::local_domain_md_range_policy_cells_fv_skip_ghost_layers( domain ),
+        KOKKOS_LAMBDA( const int id, const int x, const int y, const int r ) {
+            if ( do_cmb && r == 1 && util::has_flag( boundary_mask( id, 0, 0, 0 ), Flag::CMB ) )
+            {
+                data( id, x, y, 1 ) = T_cmb;
+                data( id, x, y, 0 ) = T_cmb;
+            }
+            if ( do_surf && r == fv_r_last && util::has_flag( boundary_mask( id, 0, 0, mask_r_last ), Flag::SURFACE ) )
+            {
+                data( id, x, y, fv_r_last )     = T_surf;
+                data( id, x, y, fv_r_last + 1 ) = T_surf;
+            }
+        } );
+
+    Kokkos::fence();
+}
+
 template < typename ScalarT >
 void apply_dirichlet_bcs(
     linalg::VectorFVScalar< ScalarT >&                              T,
@@ -60,32 +105,7 @@ void apply_dirichlet_bcs(
     const DirichletBCs< ScalarT >&                                  bcs,
     const grid::shell::DistributedDomain&                           domain )
 {
-    using Flag = grid::shell::ShellBoundaryFlag;
-
-    auto data = T.grid_data();
-
-    // Pre-compute the r indices for boundary cell detection.
-    // FV array (size n_rad+1): ghost at r=0, real cells at r=1..n_rad-1, ghost at r=n_rad.
-    // Q1 mask array (size n_rad):  CMB at r=0, SURFACE at r=n_rad-1.
-    const int fv_r_last   = static_cast< int >( data.extent( 3 ) ) - 2;
-    const int mask_r_last = static_cast< int >( boundary_mask.extent( 3 ) ) - 1;
-
-    const ScalarT T_cmb     = bcs.T_cmb;
-    const ScalarT T_surface = bcs.T_surface;
-    const bool    do_cmb    = bcs.apply_cmb;
-    const bool    do_surf   = bcs.apply_surface;
-
-    Kokkos::parallel_for(
-        "apply_dirichlet_bcs",
-        grid::shell::local_domain_md_range_policy_cells_fv_skip_ghost_layers( domain ),
-        KOKKOS_LAMBDA( const int id, const int x, const int y, const int r ) {
-            if ( do_cmb && r == 1 && util::has_flag( boundary_mask( id, 0, 0, 0 ), Flag::CMB ) )
-                data( id, x, y, r ) = T_cmb;
-            if ( do_surf && r == fv_r_last && util::has_flag( boundary_mask( id, 0, 0, mask_r_last ), Flag::SURFACE ) )
-                data( id, x, y, r ) = T_surface;
-        } );
-
-    Kokkos::fence();
+    apply_dirichlet_bcs( T.grid_data(), boundary_mask, bcs, domain );
 }
 
 /// @brief Computes cell centers and writes to a vector valued finite volume function.

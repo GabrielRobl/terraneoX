@@ -137,7 +137,11 @@ void test( const int level )
     };
 
     // Apply BCs to initial condition so boundaries start at the correct values.
+    // This also sets the ghost cells at the physical radial boundaries (CMB r=0,
+    // surface r=N), which update_fv_ghost_layers never fills (no subdomain neighbour).
     fv::hex::apply_dirichlet_bcs( T, boundary_mask_data, bcs, domain );
+    // Populate lateral ghost layers so all ghost cells are correct before step 1.
+    communication::shell::update_fv_ghost_layers( domain, T.grid_data() );
 
     // Diffusion CFL for explicit scheme on a 3D non-orthogonal mesh:
     //   dt <= h^2 / (6*kappa)  — orthogonal 3D stability limit.
