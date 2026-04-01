@@ -8,6 +8,9 @@
 #include "fe/wedge/kernel_helpers.hpp"
 #include "grid/shell/spherical_shell.hpp"
 #include "impl/Kokkos_Profiling.hpp"
+#ifdef KOKKOS_ENABLE_OPENMP
+#include "impl/Kokkos_HostThreadTeam.hpp"
+#endif
 #include "linalg/operator.hpp"
 #include "linalg/solvers/gca/local_matrix_storage.hpp"
 #include "grid/bit_masks.hpp"
@@ -213,6 +216,27 @@ class EpsilonDivDivKerngen
             r_tile_       = 1;
             r_passes_     = 1;
         }
+#ifdef KOKKOS_ENABLE_OPENMP
+        // OpenMP host teams are capped at min(num_threads, 64) by Kokkos.
+        // Choose tile sizes so that team_size = lat^2 * r_tile fits.
+        else if constexpr ( std::is_same_v< Kokkos::DefaultExecutionSpace, Kokkos::OpenMP > )
+        {
+            const int max_team = std::min( Kokkos::OpenMP().concurrency(),
+                                           static_cast< int >( Kokkos::Impl::HostThreadTeamData::max_team_members ) );
+            if ( max_team >= 64 )
+            {
+                lat_tile_ = 4; r_tile_ = 4; r_passes_ = 4;   // team_size = 64
+            }
+            else if ( max_team >= 16 )
+            {
+                lat_tile_ = 4; r_tile_ = 1; r_passes_ = 16;  // team_size = 16
+            }
+            else
+            {
+                lat_tile_ = 1; r_tile_ = 1; r_passes_ = 1;   // team_size = 1 (serial-like)
+            }
+        }
+#endif
         else
         {
             lat_tile_     = 4;
