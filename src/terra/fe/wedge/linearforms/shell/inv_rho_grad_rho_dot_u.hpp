@@ -26,9 +26,10 @@ namespace terra::fe::wedge::linearforms::shell {
 /// (TALA) and the Projected Density Approximation (PDA) for compressible Stokes flow in
 /// geodynamics. See the [Stokes documentation](@ref stokes-compressible) for the full context.
 ///
-/// \note The minus sign that appears in front of this integral in the TALA/PDA formulation is
-/// **not** included here. It must be applied at the call site when assembling the RHS vector
-/// \f$\mathbf{g}\f$.
+/// \note The sign convention at the call site depends on the (2,1) block of the Stokes operator.
+/// The `Divergence` block computes \f$-(q, \mathrm{div}\, u)\f$, so the mass conservation
+/// equation \f$-(q, \mathrm{div}\, u) = f_p\f$ requires
+/// \f$f_p = +\frac{1}{\rho}\nabla\rho\cdot\mathbf{u}\f$ term (positive sign).
 ///
 /// \note \f$\rho\f$ must not vanish in the domain; no singular-value protection is applied.
 ///
