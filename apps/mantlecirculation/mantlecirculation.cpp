@@ -237,7 +237,7 @@ Result<> run( const Parameters& prm )
 {
     auto table = std::make_shared< util::Table >();
 
-    if ( const auto create_directories_result = create_directories( prm.io_parameters );
+    if ( const auto create_directories_result = create_directories( prm.io_params );
          create_directories_result.is_err() )
     {
         return create_directories_result.error();
@@ -265,20 +265,18 @@ Result<> run( const Parameters& prm )
     std::vector< Grid4DDataScalar< grid::NodeOwnershipFlag > >        ownership_mask_data;
     std::vector< Grid4DDataScalar< grid::shell::ShellBoundaryFlag > > boundary_mask_data;
 
-    for ( int level = prm.mesh_parameters.refinement_level_mesh_min;
-          level <= prm.mesh_parameters.refinement_level_mesh_max;
+    for ( int level = prm.mesh_params.refinement_level_mesh_min; level <= prm.mesh_params.refinement_level_mesh_max;
           level++ )
     {
-        const int idx = level - prm.mesh_parameters.refinement_level_mesh_min;
+        const int idx = level - prm.mesh_params.refinement_level_mesh_min;
 
-        domains.push_back(
-            DistributedDomain::create_uniform(
-                level,
-                level,
-                prm.mesh_parameters.radius_min,
-                prm.mesh_parameters.radius_max,
-                prm.mesh_parameters.refinement_level_subdomains,
-                prm.mesh_parameters.refinement_level_subdomains ) );
+        domains.push_back( DistributedDomain::create_uniform(
+            level,
+            level,
+            prm.mesh_params.radius_min,
+            prm.mesh_params.radius_max,
+            prm.mesh_params.refinement_level_subdomains,
+            prm.mesh_params.refinement_level_subdomains ) );
         coords_shell.push_back( grid::shell::subdomain_unit_sphere_single_shell_coords< ScalarType >( domains[idx] ) );
         coords_radii.push_back( grid::shell::subdomain_shell_radii< ScalarType >( domains[idx] ) );
         ownership_mask_data.push_back( grid::setup_node_ownership_mask_data( domains[idx] ) );
@@ -327,7 +325,7 @@ Result<> run( const Parameters& prm )
 
     std::vector< Grid2DDataScalar< ScalarType > > radial_viscosity_profile;
 
-    if ( !prm.physics_parameters.viscosity_parameters.radial_profile_enabled )
+    if ( !prm.physics_params.viscosity_params.radial_profile_enabled )
     {
         logroot << "Using constant viscosity profile." << std::endl;
         for ( int level = 0; level < num_levels; level++ )
@@ -341,12 +339,11 @@ Result<> run( const Parameters& prm )
         logroot << "Using radially varying viscosity profile." << std::endl;
         for ( int level = 0; level < num_levels; level++ )
         {
-            radial_viscosity_profile.push_back(
-                shell::interpolate_radial_profile_into_subdomains_from_csv(
-                    prm.physics_parameters.viscosity_parameters.radial_profile_csv_filename,
-                    prm.physics_parameters.viscosity_parameters.radial_profile_radii_key,
-                    prm.physics_parameters.viscosity_parameters.radial_profile_viscosity_key,
-                    coords_radii[level] ) );
+            radial_viscosity_profile.push_back( shell::interpolate_radial_profile_into_subdomains_from_csv(
+                prm.physics_params.viscosity_params.radial_profile_csv_filename,
+                prm.physics_params.viscosity_params.radial_profile_radii_key,
+                prm.physics_params.viscosity_params.radial_profile_viscosity_key,
+                coords_radii[level] ) );
         }
     }
 
@@ -370,7 +367,7 @@ Result<> run( const Parameters& prm )
         // Note that although we perform GCA we need some approximation of the viscosity for the
         // coarse grids for the weighting of the mass matrix.
         geophysics::viscosity::RadialProfileViscosityInterpolator viscosity_interpolator(
-            radial_viscosity_profile[level], prm.physics_parameters.viscosity_parameters.reference_viscosity );
+            radial_viscosity_profile[level], prm.physics_params.viscosity_params.reference_viscosity );
         viscosity_interpolator.interpolate( eta[level].grid_data() );
     }
 
@@ -395,7 +392,7 @@ Result<> run( const Parameters& prm )
 
     std::vector< VectorQ1IsoQ2Q1< ScalarType > > stokes_tmp_fgmres;
 
-    const auto num_stokes_fgmres_tmps = 2 * prm.stokes_solver_parameters.krylov_restart + 4;
+    const auto num_stokes_fgmres_tmps = 2 * prm.stokes_solver_params.krylov_restart + 4;
 
     stokes_tmp_fgmres.reserve( num_stokes_fgmres_tmps );
     for ( int i = 0; i < num_stokes_fgmres_tmps; i++ )
@@ -503,12 +500,12 @@ Result<> run( const Parameters& prm )
         { SURFACE, DIRICHLET },
     };
 
-    if ( prm.boundary_conditions_parameters.velocity_bc_cmb == BoundaryConditionsParameters::VelocityBC::FREE_SLIP )
+    if ( prm.boundary_params.velocity_bc_cmb == BoundaryConditionsParameters::VelocityBC::FREE_SLIP )
     {
         grid::shell::set_boundary_condition_flag( bcs, CMB, FREESLIP );
     }
 
-    if ( prm.boundary_conditions_parameters.velocity_bc_surface == BoundaryConditionsParameters::VelocityBC::FREE_SLIP )
+    if ( prm.boundary_params.velocity_bc_surface == BoundaryConditionsParameters::VelocityBC::FREE_SLIP )
     {
         grid::shell::set_boundary_condition_flag( bcs, SURFACE, FREESLIP );
     }
@@ -582,7 +579,7 @@ Result<> run( const Parameters& prm )
     {
         for ( int level = num_levels - 2; level >= 0; level-- )
         {
-            logroot << "Assembling GCA on level " << prm.mesh_parameters.refinement_level_mesh_min + level << std::endl;
+            logroot << "Assembling GCA on level " << prm.mesh_params.refinement_level_mesh_min + level << std::endl;
 
             TwoGridGCA< ScalarType, Viscous >(
                 ( level == num_levels - 2 ) ? K_neumann.block_11() : A_c[level + 1],
@@ -636,11 +633,11 @@ Result<> run( const Parameters& prm )
         smoother_tmps.push_back( tmp_mg_2[level] );
 
         smoothers.emplace_back(
-            prm.stokes_solver_parameters.viscous_pc_chebyshev_order,
+            prm.stokes_solver_params.viscous_pc_chebyshev_order,
             inverse_diagonals[level],
             smoother_tmps,
-            prm.stokes_solver_parameters.viscous_pc_num_smoothing_steps_prepost,
-            prm.stokes_solver_parameters.viscous_pc_num_power_iterations );
+            prm.stokes_solver_params.viscous_pc_num_smoothing_steps_prepost,
+            prm.stokes_solver_params.viscous_pc_num_power_iterations );
     }
 
     logroot << "Setting up multigrid coarse grid solver ..." << std::endl;
@@ -670,7 +667,7 @@ Result<> run( const Parameters& prm )
         smoothers,
         smoothers,
         coarse_grid_solver,
-        prm.stokes_solver_parameters.viscous_pc_num_vcycles,
+        prm.stokes_solver_params.viscous_pc_num_vcycles,
         1e-6 );
 
     // Schur complement: lumped inverse diagonal of pressure mass
@@ -719,10 +716,10 @@ Result<> run( const Parameters& prm )
 
     linalg::solvers::FGMRES< Stokes, PrecStokes > stokes_fgmres(
         stokes_tmp_fgmres,
-        { .restart                     = prm.stokes_solver_parameters.krylov_restart,
-          .relative_residual_tolerance = prm.stokes_solver_parameters.krylov_relative_tolerance,
-          .absolute_residual_tolerance = prm.stokes_solver_parameters.krylov_absolute_tolerance,
-          .max_iterations              = prm.stokes_solver_parameters.krylov_max_iterations },
+        { .restart                     = prm.stokes_solver_params.krylov_restart,
+          .relative_residual_tolerance = prm.stokes_solver_params.krylov_relative_tolerance,
+          .absolute_residual_tolerance = prm.stokes_solver_params.krylov_absolute_tolerance,
+          .max_iterations              = prm.stokes_solver_params.krylov_max_iterations },
         table,
         prec_stokes );
     stokes_fgmres.set_tag( "stokes_fgmres" );
@@ -761,8 +758,8 @@ Result<> run( const Parameters& prm )
     // neighbour exists beyond a physical boundary).
 
     const fv::hex::DirichletBCs< ScalarType > fct_bcs{
-        .T_cmb         = static_cast< ScalarType >( prm.boundary_conditions_parameters.temperature_cmb ),
-        .T_surface     = static_cast< ScalarType >( prm.boundary_conditions_parameters.temperature_surface ),
+        .T_cmb         = static_cast< ScalarType >( prm.boundary_params.temperature_cmb ),
+        .T_surface     = static_cast< ScalarType >( prm.boundary_params.temperature_surface ),
         .apply_cmb     = true,
         .apply_surface = true };
 
@@ -779,8 +776,8 @@ Result<> run( const Parameters& prm )
         { "dofs_velocity", num_dofs_velocity },
         { "dofs_temperature", num_dofs_temperature },
         { "dofs_pressure", num_dofs_pressure },
-        { "level_velocity", prm.mesh_parameters.refinement_level_mesh_max },
-        { "level_pressure", prm.mesh_parameters.refinement_level_mesh_max - 1 },
+        { "level_velocity", prm.mesh_params.refinement_level_mesh_max },
+        { "level_pressure", prm.mesh_params.refinement_level_mesh_max - 1 },
     } );
 
     table->print_pretty();
@@ -789,7 +786,7 @@ Result<> run( const Parameters& prm )
     // Setting up XDMF output (serves for both checkpointing and visualization).
 
     io::XDMFOutput xdmf_output(
-        prm.io_parameters.outdir + "/" + prm.io_parameters.xdmf_dir,
+        prm.io_params.outdir + "/" + prm.io_params.xdmf_dir,
         domains[velocity_level],
         coords_shell[velocity_level],
         coords_radii[velocity_level] );
@@ -800,18 +797,18 @@ Result<> run( const Parameters& prm )
 
     int timestep_initial = 0;
 
-    const bool loading_checkpoint = !prm.io_parameters.checkpoint_dir.empty() && prm.io_parameters.checkpoint_step >= 0;
+    const bool loading_checkpoint = !prm.io_params.checkpoint_dir.empty() && prm.io_params.checkpoint_step >= 0;
 
     if ( loading_checkpoint )
     {
         // Starting the time stepping from the next step after the loaded step.
-        timestep_initial = prm.io_parameters.checkpoint_step;
+        timestep_initial = prm.io_params.checkpoint_step;
 
-        logroot << "Loading checkpoint from " << prm.io_parameters.checkpoint_dir << " at step " << timestep_initial
+        logroot << "Loading checkpoint from " << prm.io_params.checkpoint_dir << " at step " << timestep_initial
                 << std::endl;
 
         auto success_vel = io::read_xdmf_checkpoint_grid(
-            prm.io_parameters.checkpoint_dir,
+            prm.io_params.checkpoint_dir,
             label_stokes + "_u",
             timestep_initial,
             domains[velocity_level],
@@ -823,11 +820,7 @@ Result<> run( const Parameters& prm )
         }
 
         auto success_temp = io::read_xdmf_checkpoint_grid(
-            prm.io_parameters.checkpoint_dir,
-            label_temperature,
-            timestep_initial,
-            domains[velocity_level],
-            T.grid_data() );
+            prm.io_params.checkpoint_dir, label_temperature, timestep_initial, domains[velocity_level], T.grid_data() );
 
         if ( success_temp.is_err() )
         {
@@ -853,9 +846,9 @@ Result<> run( const Parameters& prm )
     logroot << "Writing initial radial profiles ..." << std::endl;
 
     compute_and_write_radial_profiles(
-        T, subdomain_shell_idx, domains[velocity_level], prm.io_parameters, timestep_initial );
+        T, subdomain_shell_idx, domains[velocity_level], prm.io_params, timestep_initial );
     compute_and_write_radial_profiles(
-        eta[velocity_level], subdomain_shell_idx, domains[velocity_level], prm.io_parameters, timestep_initial );
+        eta[velocity_level], subdomain_shell_idx, domains[velocity_level], prm.io_params, timestep_initial );
 
     ScalarType simulated_time = 0.0;
 
@@ -867,7 +860,7 @@ Result<> run( const Parameters& prm )
 
     logroot << "Starting time stepping!" << std::endl;
 
-    for ( int timestep = timestep_initial + 1; timestep < prm.time_stepping_parameters.max_timesteps; timestep++ )
+    for ( int timestep = timestep_initial + 1; timestep < prm.time_stepping_params.max_timesteps; timestep++ )
     {
         logroot << "\n### Timestep " << timestep << " ###" << std::endl;
 
@@ -885,7 +878,7 @@ Result<> run( const Parameters& prm )
                 coords_radii[velocity_level],
                 stok_vecs["tmp"].block_1().grid_data(),
                 T.grid_data(),
-                prm.physics_parameters.rayleigh_number ) );
+                prm.physics_params.rayleigh_number ) );
 
         linalg::apply( M, stok_vecs["tmp"].block_1(), stok_vecs["f"].block_1() );
 
@@ -948,8 +941,8 @@ Result<> run( const Parameters& prm )
             fv_cell_centers.grid_data(),
             coords_shell[velocity_level],
             coords_radii[velocity_level],
-            prm.physics_parameters.diffusivity );
-        const auto dt = prm.time_stepping_parameters.dt_scaling * dt_stable;
+            prm.physics_params.diffusivity );
+        const auto dt = prm.time_stepping_params.dt_scaling * dt_stable;
 
         logroot << "Computing dt (FCT stable) ..." << std::endl;
         logroot << "    dt_stable:                     " << dt_stable << std::endl;
@@ -958,15 +951,15 @@ Result<> run( const Parameters& prm )
         {
             util::Timer timer_fct_substeps( "fct_substeps" );
 
-            for ( int i = 0; i < prm.time_stepping_parameters.energy_substeps; i++ )
+            for ( int i = 0; i < prm.time_stepping_params.energy_substeps; i++ )
             {
                 logroot << "Solving energy (FCT, substep " << i << ") ..." << std::endl;
 
                 {
                     util::Timer timer_fct_source_step( "fct_explicit_step_updating_source_term" );
-                    if ( prm.physics_parameters.constant_internal_heating )
+                    if ( prm.physics_params.constant_internal_heating )
                     {
-                        linalg::assign( T_source, prm.physics_parameters.constant_internal_heating_value );
+                        linalg::assign( T_source, prm.physics_params.constant_internal_heating_value );
                     }
                     timer_fct_source_step.stop();
 
@@ -980,7 +973,7 @@ Result<> run( const Parameters& prm )
                         coords_radii[velocity_level],
                         dt,
                         fv_fct_bufs,
-                        prm.physics_parameters.diffusivity,
+                        prm.physics_params.diffusivity,
                         T_source.grid_data(),
                         /*subtract_divergence=*/true,
                         boundary_mask_data[velocity_level],
@@ -1021,19 +1014,18 @@ Result<> run( const Parameters& prm )
 
         xdmf_output.write();
 
+        compute_and_write_radial_profiles( T, subdomain_shell_idx, domains[velocity_level], prm.io_params, timestep );
         compute_and_write_radial_profiles(
-            T, subdomain_shell_idx, domains[velocity_level], prm.io_parameters, timestep );
-        compute_and_write_radial_profiles(
-            eta[velocity_level], subdomain_shell_idx, domains[velocity_level], prm.io_parameters, timestep );
+            eta[velocity_level], subdomain_shell_idx, domains[velocity_level], prm.io_params, timestep );
 
-        simulated_time += prm.time_stepping_parameters.energy_substeps * dt;
+        simulated_time += prm.time_stepping_params.energy_substeps * dt;
 
-        logroot << "Simulated time: " << simulated_time << " (stopping at " << prm.time_stepping_parameters.t_end
-                << ", we're at " << simulated_time / prm.time_stepping_parameters.t_end * 100.0 << "%)" << std::endl;
+        logroot << "Simulated time: " << simulated_time << " (stopping at " << prm.time_stepping_params.t_end
+                << ", we're at " << simulated_time / prm.time_stepping_params.t_end * 100.0 << "%)" << std::endl;
 
-        write_timer_tree( prm.io_parameters, timestep );
+        write_timer_tree( prm.io_params, timestep );
 
-        if ( simulated_time >= prm.time_stepping_parameters.t_end )
+        if ( simulated_time >= prm.time_stepping_params.t_end )
         {
             break;
         }

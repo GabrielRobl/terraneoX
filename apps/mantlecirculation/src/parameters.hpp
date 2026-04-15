@@ -100,13 +100,13 @@ struct IOParameters
 
 struct Parameters
 {
-    MeshParameters               mesh_parameters;
-    BoundaryConditionsParameters boundary_conditions_parameters;
-    StokesSolverParameters       stokes_solver_parameters;
-    EnergySolverParameters       energy_solver_parameters;
-    PhysicsParameters            physics_parameters;
-    TimeSteppingParameters       time_stepping_parameters;
-    IOParameters                 io_parameters;
+    MeshParameters               mesh_params;
+    BoundaryConditionsParameters boundary_params;
+    StokesSolverParameters       stokes_solver_params;
+    EnergySolverParameters       energy_solver_params;
+    PhysicsParameters            physics_params;
+    TimeSteppingParameters       time_stepping_params;
+    IOParameters                 io_params;
 
     std::string output_config_file;
 };
@@ -142,17 +142,17 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     /// Domain and mesh ///
     ///////////////////////
 
-    add_option_with_default( app, "--refinement-level-mesh-min", parameters.mesh_parameters.refinement_level_mesh_min )
+    add_option_with_default( app, "--refinement-level-mesh-min", parameters.mesh_params.refinement_level_mesh_min )
         ->group( "Domain" );
-    add_option_with_default( app, "--refinement-level-mesh-max", parameters.mesh_parameters.refinement_level_mesh_max )
+    add_option_with_default( app, "--refinement-level-mesh-max", parameters.mesh_params.refinement_level_mesh_max )
         ->group( "Domain" );
 
     add_option_with_default(
-        app, "--refinement-level-subdomains", parameters.mesh_parameters.refinement_level_subdomains )
+        app, "--refinement-level-subdomains", parameters.mesh_params.refinement_level_subdomains )
         ->group( "Domain" );
 
-    add_option_with_default( app, "--radius-min", parameters.mesh_parameters.radius_min )->group( "Domain" );
-    add_option_with_default( app, "--radius-max", parameters.mesh_parameters.radius_max )->group( "Domain" );
+    add_option_with_default( app, "--radius-cmb", parameters.mesh_params.radius_cmb )->group( "Domain" );
+    add_option_with_default( app, "--radius-surface", parameters.mesh_params.radius_surface )->group( "Domain" );
 
     ///////////////////////////
     /// Boundary conditions ///
@@ -168,37 +168,37 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         { "freeslip", BoundaryConditionsParameters::VelocityBC::FREE_SLIP },
     };
 
-    add_option_with_default( app, "--velocity-bc-cmb", parameters.boundary_conditions_parameters.velocity_bc_cmb )
+    add_option_with_default( app, "--velocity-bc-cmb", parameters.boundary_params.velocity_bc_cmb )
         ->transform( CLI::CheckedTransformer( velocity_bc_cmb_map, CLI::ignore_case ) )
         ->default_val( "noslip" )
         ->group( "Boundary Conditions" );
 
     add_option_with_default(
-        app, "--velocity-bc-surface", parameters.boundary_conditions_parameters.velocity_bc_surface )
+        app, "--velocity-bc-surface", parameters.boundary_params.velocity_bc_surface )
         ->transform( CLI::CheckedTransformer( velocity_bc_surface_map, CLI::ignore_case ) )
         ->default_val( "noslip" )
         ->group( "Boundary Conditions" );
 
     add_option_with_default(
-        app, "--temperature-bc-value-cmb", parameters.boundary_conditions_parameters.temperature_cmb )
+        app, "--temperature-bc-value-cmb", parameters.boundary_params.temperature_cmb )
         ->group( "Boundary Conditions" );
 
     add_option_with_default(
-        app, "--temperature-bc-value-surface", parameters.boundary_conditions_parameters.temperature_surface )
+        app, "--temperature-bc-value-surface", parameters.boundary_params.temperature_surface )
         ->group( "Boundary Conditions" );
 
     //////////////////////////////
-    /// Geophysical parameters ///
+    /// (Geo-)Physical parameters ///
     //////////////////////////////
 
-    add_option_with_default( app, "--diffusivity", parameters.physics_parameters.diffusivity );
-    add_option_with_default( app, "--rayleigh-number", parameters.physics_parameters.rayleigh_number );
+    add_option_with_default( app, "--diffusivity", parameters.physics_params.diffusivity );
+    add_option_with_default( app, "--rayleigh-number", parameters.physics_params.rayleigh_number );
 
     const auto radial_profile_enabled =
         add_flag_with_default(
             app,
             "--viscosity-radial-profile",
-            parameters.physics_parameters.viscosity_parameters.radial_profile_enabled )
+            parameters.physics_params.viscosity_params.radial_profile_enabled )
             ->group( "Viscosity" )
             ->description(
                 "Add this flag if you want to supply a radial viscosity profile. "
@@ -207,110 +207,110 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default(
         app,
         "--viscosity-radial-profile-csv-filename",
-        parameters.physics_parameters.viscosity_parameters.radial_profile_csv_filename )
+        parameters.physics_params.viscosity_params.radial_profile_csv_filename )
         ->needs( radial_profile_enabled )
         ->group( "Viscosity" );
     add_option_with_default(
         app,
         "--viscosity-radial-profile-radii-key",
-        parameters.physics_parameters.viscosity_parameters.radial_profile_radii_key )
+        parameters.physics_params.viscosity_params.radial_profile_radii_key )
         ->needs( radial_profile_enabled )
         ->group( "Viscosity" );
     add_option_with_default(
         app,
         "--viscosity-radial-profile-value-key",
-        parameters.physics_parameters.viscosity_parameters.radial_profile_viscosity_key )
+        parameters.physics_params.viscosity_params.radial_profile_viscosity_key )
         ->needs( radial_profile_enabled )
         ->group( "Viscosity" );
     add_option_with_default(
-        app, "--viscosity-reference-value", parameters.physics_parameters.viscosity_parameters.reference_viscosity )
+        app, "--viscosity-reference-value", parameters.physics_params.viscosity_params.reference_viscosity )
         ->needs( radial_profile_enabled )
         ->group( "Viscosity" );
 
     add_flag_with_default(
-        app, "--constant-internal-heating-enabled", parameters.physics_parameters.constant_internal_heating );
+        app, "--constant-internal-heating-enabled", parameters.physics_params.constant_internal_heating );
     add_option_with_default(
-        app, "--constant-internal-heating-value", parameters.physics_parameters.constant_internal_heating_value );
+        app, "--constant-internal-heating-value", parameters.physics_params.constant_internal_heating_value );
 
     ///////////////////////////
     /// Time discretization ///
     ///////////////////////////
 
-    add_option_with_default( app, "--dt-scaling", parameters.time_stepping_parameters.dt_scaling )
+    add_option_with_default( app, "--dt-scaling", parameters.time_stepping_params.dt_scaling )
         ->description(
             "A robust (stable) dt is computed the the actual face-normal velocity fluxes and cell volumes via a "
             "parallel reduce over all cells. However, a smaller value might still be desired due to accuracy "
             "considerations. You can scale the computed dt using this value (e.g. set to 0.5 to half the estimated dt, "
             "set to 1.0 to just use the estimated dt)." )
         ->group( "Time Discretization" );
-    add_option_with_default( app, "--t-end", parameters.time_stepping_parameters.t_end )
+    add_option_with_default( app, "--t-end", parameters.time_stepping_params.t_end )
         ->group( "Time Discretization" );
-    add_option_with_default( app, "--max-timesteps", parameters.time_stepping_parameters.max_timesteps )
+    add_option_with_default( app, "--max-timesteps", parameters.time_stepping_params.max_timesteps )
         ->group( "Time Discretization" )
         ->description(
             "Simulation aborts when this time step index is reached. "
             "If a checkpoint is loaded, the simulation will start at the next step after the loaded checkpoint. "
             "This means the number of time steps executed might be smaller than what is passed in here." );
-    add_option_with_default( app, "--energy-substeps", parameters.time_stepping_parameters.energy_substeps )
+    add_option_with_default( app, "--energy-substeps", parameters.time_stepping_params.energy_substeps )
         ->group( "Time Discretization" );
 
     /////////////////////
     /// Stokes solver ///
     /////////////////////
 
-    add_option_with_default( app, "--stokes-krylov-restart", parameters.stokes_solver_parameters.krylov_restart )
+    add_option_with_default( app, "--stokes-krylov-restart", parameters.stokes_solver_params.krylov_restart )
         ->group( "Stokes Solver" );
     add_option_with_default(
-        app, "--stokes-krylov-max-iterations", parameters.stokes_solver_parameters.krylov_max_iterations )
+        app, "--stokes-krylov-max-iterations", parameters.stokes_solver_params.krylov_max_iterations )
         ->group( "Stokes Solver" );
     add_option_with_default(
-        app, "--stokes-krylov-relative-tolerance", parameters.stokes_solver_parameters.krylov_relative_tolerance )
+        app, "--stokes-krylov-relative-tolerance", parameters.stokes_solver_params.krylov_relative_tolerance )
         ->group( "Stokes Solver" );
     add_option_with_default(
-        app, "--stokes-krylov-absolute-tolerance", parameters.stokes_solver_parameters.krylov_absolute_tolerance )
+        app, "--stokes-krylov-absolute-tolerance", parameters.stokes_solver_params.krylov_absolute_tolerance )
         ->group( "Stokes Solver" );
     add_option_with_default(
-        app, "--stokes-viscous-pc-num-vcycles", parameters.stokes_solver_parameters.viscous_pc_num_vcycles )
+        app, "--stokes-viscous-pc-num-vcycles", parameters.stokes_solver_params.viscous_pc_num_vcycles )
         ->group( "Stokes Solver" );
     add_option_with_default(
-        app, "--stokes-viscous-pc-cheby-order", parameters.stokes_solver_parameters.viscous_pc_chebyshev_order )
+        app, "--stokes-viscous-pc-cheby-order", parameters.stokes_solver_params.viscous_pc_chebyshev_order )
         ->group( "Stokes Solver" );
     add_option_with_default(
         app,
         "--stokes-viscous-pc-num-smoothing-steps-prepost",
-        parameters.stokes_solver_parameters.viscous_pc_num_smoothing_steps_prepost )
+        parameters.stokes_solver_params.viscous_pc_num_smoothing_steps_prepost )
         ->group( "Stokes Solver" );
     add_option_with_default(
         app,
         "--stokes-viscous-pc-num-power-iterations",
-        parameters.stokes_solver_parameters.viscous_pc_num_power_iterations )
+        parameters.stokes_solver_params.viscous_pc_num_power_iterations )
         ->group( "Stokes Solver" );
 
     /////////////////////
     /// Energy solver ///
     /////////////////////
 
-    add_option_with_default( app, "--energy-krylov-restart", parameters.energy_solver_parameters.krylov_restart )
+    add_option_with_default( app, "--energy-krylov-restart", parameters.energy_solver_params.krylov_restart )
         ->group( "Energy Solver" );
     add_option_with_default(
-        app, "--energy-krylov-max-iterations", parameters.energy_solver_parameters.krylov_max_iterations )
+        app, "--energy-krylov-max-iterations", parameters.energy_solver_params.krylov_max_iterations )
         ->group( "Energy Solver" );
     add_option_with_default(
-        app, "--energy-krylov-relative-tolerance", parameters.energy_solver_parameters.krylov_relative_tolerance )
+        app, "--energy-krylov-relative-tolerance", parameters.energy_solver_params.krylov_relative_tolerance )
         ->group( "Energy Solver" );
     add_option_with_default(
-        app, "--energy-krylov-absolute-tolerance", parameters.energy_solver_parameters.krylov_absolute_tolerance )
+        app, "--energy-krylov-absolute-tolerance", parameters.energy_solver_params.krylov_absolute_tolerance )
         ->group( "Energy Solver" );
 
     //////////////////////
     /// Input / output ///
     //////////////////////
 
-    add_option_with_default( app, "--outdir", parameters.io_parameters.outdir )->group( "I/O" );
-    add_flag_with_default( app, "--outdir-overwrite", parameters.io_parameters.overwrite )->group( "I/O" );
+    add_option_with_default( app, "--outdir", parameters.io_params.outdir )->group( "I/O" );
+    add_flag_with_default( app, "--outdir-overwrite", parameters.io_params.overwrite )->group( "I/O" );
 
-    add_option_with_default( app, "--checkpoint-dir", parameters.io_parameters.checkpoint_dir )->group( "I/O" );
-    add_option_with_default( app, "--checkpoint-step", parameters.io_parameters.checkpoint_step )->group( "I/O" );
+    add_option_with_default( app, "--checkpoint-dir", parameters.io_params.checkpoint_dir )->group( "I/O" );
+    add_option_with_default( app, "--checkpoint-step", parameters.io_params.checkpoint_step )->group( "I/O" );
 
     try
     {
