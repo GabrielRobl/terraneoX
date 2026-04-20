@@ -296,7 +296,7 @@ void mult_elementwise_inplace(
 template < typename ScalarType >
 ScalarType min_entry( const grid::Grid4DDataScalar< ScalarType >& x )
 {
-    ScalarType min_val = 0.0;
+    ScalarType min_mag = std::numeric_limits< ScalarType >::max();
     Kokkos::parallel_reduce(
         "min_entry",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
@@ -304,19 +304,19 @@ ScalarType min_entry( const grid::Grid4DDataScalar< ScalarType >& x )
             ScalarType val = x( local_subdomain, i, j, k );
             local_min      = Kokkos::min( local_min, val );
         },
-        Kokkos::Min< ScalarType >( min_val ) );
+        Kokkos::Min< ScalarType >( min_mag ) );
 
     Kokkos::fence();
 
-    MPI_Allreduce( MPI_IN_PLACE, &min_val, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
+    MPI_Allreduce( MPI_IN_PLACE, &min_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
 
-    return min_val;
+    return min_mag;
 }
 
 template < typename ScalarType >
 ScalarType min_abs_entry( const grid::Grid4DDataScalar< ScalarType >& x )
 {
-    ScalarType min_mag = 0.0;
+    ScalarType min_mag = std::numeric_limits< ScalarType >::max();
     Kokkos::parallel_reduce(
         "min_abs_entry",
         Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
@@ -331,6 +331,116 @@ ScalarType min_abs_entry( const grid::Grid4DDataScalar< ScalarType >& x )
     MPI_Allreduce( MPI_IN_PLACE, &min_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
 
     return min_mag;
+}
+
+template < typename ScalarType >
+ScalarType min_entry_subset(
+    const grid::Grid4DDataScalar< ScalarType >& x,
+    dense::Vec< int, 4 >                        start,
+    dense::Vec< int, 4 >                        end_excl )
+{
+    ScalarType min_mag = std::numeric_limits< ScalarType >::max();
+    Kokkos::parallel_reduce(
+        "min_entry",
+        Kokkos::MDRangePolicy(
+            { start( 0 ), start( 1 ), start( 2 ), start( 3 ) },
+            { end_excl( 0 ), end_excl( 1 ), end_excl( 2 ), end_excl( 3 ) } ),
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_min ) {
+            ScalarType val = x( local_subdomain, i, j, k );
+            local_min      = Kokkos::min( local_min, val );
+        },
+        Kokkos::Min< ScalarType >( min_mag ) );
+
+    Kokkos::fence();
+
+    MPI_Allreduce( MPI_IN_PLACE, &min_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
+
+    return min_mag;
+}
+
+template < typename ScalarType >
+ScalarType min_abs_entry_subset(
+    const grid::Grid4DDataScalar< ScalarType >& x,
+    dense::Vec< int, 4 >                        start,
+    dense::Vec< int, 4 >                        end_excl )
+{
+    ScalarType min_mag = std::numeric_limits< ScalarType >::max();
+    Kokkos::parallel_reduce(
+        "min_abs_entry",
+        Kokkos::MDRangePolicy(
+            { start( 0 ), start( 1 ), start( 2 ), start( 3 ) },
+            { end_excl( 0 ), end_excl( 1 ), end_excl( 2 ), end_excl( 3 ) } ),
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_min ) {
+            ScalarType val = Kokkos::abs( x( local_subdomain, i, j, k ) );
+            local_min      = Kokkos::min( local_min, val );
+        },
+        Kokkos::Min< ScalarType >( min_mag ) );
+
+    Kokkos::fence();
+
+    MPI_Allreduce( MPI_IN_PLACE, &min_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MIN, MPI_COMM_WORLD );
+
+    return min_mag;
+}
+
+template < typename ScalarType >
+ScalarType max_entry( const grid::Grid4DDataScalar< ScalarType >& x )
+{
+    ScalarType max_mag = std::numeric_limits< ScalarType >::lowest();
+    Kokkos::parallel_reduce(
+        "max_entry",
+        Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_max ) {
+            ScalarType val = x( local_subdomain, i, j, k );
+            local_max      = Kokkos::max( local_max, val );
+        },
+        Kokkos::Max< ScalarType >( max_mag ) );
+
+    Kokkos::fence();
+
+    MPI_Allreduce( MPI_IN_PLACE, &max_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+
+    return max_mag;
+}
+
+template < typename ScalarType, int VecDim >
+ScalarType max_entry( const grid::Grid4DDataVec< ScalarType, VecDim >& x )
+{
+    ScalarType max_mag = std::numeric_limits< ScalarType >::lowest();
+    for ( int d = 0; d < VecDim; ++d )
+    {
+        // max_entry for scalar internally does MPI_Allreduce,
+        // so we call per-component and take the max on the host.
+        ScalarType comp_max = max_entry( x.comp_[d] );
+        max_mag             = std::max( max_mag, comp_max );
+    }
+    return max_mag;
+}
+
+template < typename ScalarType, util::FlagLike FlagType >
+ScalarType max_entry(
+    const grid::Grid4DDataScalar< ScalarType >& x,
+    const grid::Grid4DDataScalar< FlagType >&   mask,
+    const FlagType&                             mask_value )
+{
+    ScalarType max_mag = std::numeric_limits< ScalarType >::lowest();
+    Kokkos::parallel_reduce(
+        "max_entry",
+        Kokkos::MDRangePolicy( { 0, 0, 0, 0 }, { x.extent( 0 ), x.extent( 1 ), x.extent( 2 ), x.extent( 3 ) } ),
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_max ) {
+            if ( util::has_flag( mask( local_subdomain, i, j, k ), mask_value ) )
+            {
+                ScalarType val = x( local_subdomain, i, j, k );
+                local_max      = Kokkos::max( local_max, val );
+            }
+        },
+        Kokkos::Max< ScalarType >( max_mag ) );
+
+    Kokkos::fence();
+
+    MPI_Allreduce( MPI_IN_PLACE, &max_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+
+    return max_mag;
 }
 
 template < typename ScalarType >
@@ -383,6 +493,31 @@ ScalarType max_abs_entry(
                 ScalarType val = Kokkos::abs( x( local_subdomain, i, j, k ) );
                 local_max      = Kokkos::max( local_max, val );
             }
+        },
+        Kokkos::Max< ScalarType >( max_mag ) );
+
+    Kokkos::fence();
+
+    MPI_Allreduce( MPI_IN_PLACE, &max_mag, 1, mpi::mpi_datatype< ScalarType >(), MPI_MAX, MPI_COMM_WORLD );
+
+    return max_mag;
+}
+
+template < typename ScalarType >
+ScalarType max_entry_subset(
+    const grid::Grid4DDataScalar< ScalarType >& x,
+    dense::Vec< int, 4 >                        start,
+    dense::Vec< int, 4 >                        end_excl )
+{
+    ScalarType max_mag = std::numeric_limits< ScalarType >::lowest();
+    Kokkos::parallel_reduce(
+        "max_entry",
+        Kokkos::MDRangePolicy(
+            { start( 0 ), start( 1 ), start( 2 ), start( 3 ) },
+            { end_excl( 0 ), end_excl( 1 ), end_excl( 2 ), end_excl( 3 ) } ),
+        KOKKOS_LAMBDA( int local_subdomain, int i, int j, int k, ScalarType& local_max ) {
+            ScalarType val = x( local_subdomain, i, j, k );
+            local_max      = Kokkos::max( local_max, val );
         },
         Kokkos::Max< ScalarType >( max_mag ) );
 
