@@ -789,7 +789,7 @@ Result<> run( const Parameters& prm )
     communication::shell::update_fv_ghost_layers( domains[velocity_level], T_fct.grid_data() );
 
     // Project T_fct to Q1 T via L2 projection for use as Stokes RHS and output.
-    fv::hex::l2_project_fv_to_fe(
+    fv::hex::l2_project_fv_to_fe_lumped(
         T, T_fct, domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level], l2_proj_tmps );
 
     table->add_row( {
@@ -1032,7 +1032,7 @@ Result<> run( const Parameters& prm )
         // inside the substep loop would run a mass-matrix CG solve every substep.
         {
             util::Timer timer_fct_projection( "fct_l2_projection" );
-            fv::hex::l2_project_fv_to_fe(
+            fv::hex::l2_project_fv_to_fe_lumped(
                 T,
                 T_fct,
                 domains[velocity_level],
