@@ -60,6 +60,7 @@ using linalg::VectorQ1IsoQ2Q1;
 using linalg::VectorQ1Scalar;
 using linalg::VectorQ1Vec;
 using linalg::solvers::TwoGridGCA;
+using terra::kernels::common::scale;
 using util::logroot;
 using util::Ok;
 using util::Result;
@@ -75,6 +76,8 @@ struct InitialConditionInterpolator
 {
     ScalarType                                         r_min_;
     ScalarType                                         r_max_;
+    ScalarType                                         T_min_;
+    ScalarType                                         T_max_;
     Grid3DDataVec< ScalarType, 3 >                     grid_;
     Grid2DDataScalar< ScalarType >                     radii_;
     Grid4DDataScalar< ScalarType >                     data_;
@@ -84,6 +87,8 @@ struct InitialConditionInterpolator
     InitialConditionInterpolator(
         const ScalarType                                          r_min,
         const ScalarType                                          r_max,
+        const ScalarType                                          T_min,
+        const ScalarType                                          T_max,
         const Grid3DDataVec< ScalarType, 3 >&                     grid,
         const Grid2DDataScalar< ScalarType >&                     radii,
         const Grid4DDataScalar< ScalarType >&                     data,
@@ -91,6 +96,8 @@ struct InitialConditionInterpolator
         bool                                                      only_boundary )
     : r_min_( r_min )
     , r_max_( r_max )
+    , T_min_( T_min )
+    , T_max_( T_max )
     , grid_( grid )
     , radii_( radii )
     , data_( data )
@@ -109,7 +116,7 @@ struct InitialConditionInterpolator
             const dense::Vec< ScalarType, 3 > coords =
                 grid::shell::coords( local_subdomain_id, x, y, r, grid_, radii_ );
             const auto frac                      = ( r_max_ - coords.norm() ) / ( r_max_ - r_min_ );
-            data_( local_subdomain_id, x, y, r ) = Kokkos::pow( frac, 5 );
+            data_( local_subdomain_id, x, y, r ) = T_min_ + ( T_max_ - T_min_ ) * Kokkos::pow( frac, 5 );
         }
     }
 };
@@ -152,6 +159,8 @@ struct RHSVelocityInterpolator
 
 struct NoiseAdder
 {
+    ScalarType                                  T_min_;
+    ScalarType                                  T_max_;
     Grid3DDataVec< ScalarType, 3 >              grid_;
     Grid2DDataScalar< ScalarType >              radii_;
     Grid4DDataScalar< ScalarType >              data_T_;
@@ -159,11 +168,15 @@ struct NoiseAdder
     Kokkos::Random_XorShift64_Pool<>            rand_pool_;
 
     NoiseAdder(
+        const ScalarType                                   T_min,
+        const ScalarType                                   T_max,
         const Grid3DDataVec< ScalarType, 3 >&              grid,
         const Grid2DDataScalar< ScalarType >&              radii,
         const Grid4DDataScalar< ScalarType >&              data_T,
         const Grid4DDataScalar< grid::NodeOwnershipFlag >& mask )
-    : grid_( grid )
+    : T_min_( T_min )
+    , T_max_( T_max )
+    , grid_( grid )
     , radii_( radii )
     , data_T_( data_T )
     , mask_( mask )
@@ -184,11 +197,11 @@ struct NoiseAdder
         if ( process_ownes_point )
         {
             data_T_( local_subdomain_id, x, y, r ) =
-                Kokkos::clamp( data_T_( local_subdomain_id, x, y, r ) + perturbation, 0.0, 1.0 );
+                Kokkos::clamp( data_T_( local_subdomain_id, x, y, r ) + perturbation, T_min_, T_max_ );
         }
         else
         {
-            data_T_( local_subdomain_id, x, y, r ) = 0.0;
+            data_T_( local_subdomain_id, x, y, r ) = T_min_;
         }
 
         rand_pool_.free_state( generator );
@@ -200,6 +213,7 @@ struct NoiseAdder
 struct FVInitialConditionInterpolator
 {
     ScalarType                     r_min_, r_max_;
+    ScalarType                     T_min_, T_max_;
     Grid4DDataVec< ScalarType, 3 > cell_centers_;
     Grid4DDataScalar< ScalarType > data_;
 
@@ -211,7 +225,7 @@ struct FVInitialConditionInterpolator
         const ScalarType cz     = cell_centers_( id, x, y, r, 2 );
         const ScalarType radius = Kokkos::sqrt( cx * cx + cy * cy + cz * cz );
         const ScalarType frac   = ( r_max_ - radius ) / ( r_max_ - r_min_ );
-        data_( id, x, y, r )    = Kokkos::pow( frac, ScalarType( 5 ) );
+        data_( id, x, y, r )    = T_min_ + ( T_max_ - T_min_ ) * Kokkos::pow( frac, ScalarType( 5 ) );
     }
 };
 
@@ -219,6 +233,7 @@ struct FVInitialConditionInterpolator
 /// so no ownership mask is needed.
 struct FVNoiseAdder
 {
+    ScalarType                       T_min_, T_max_;
     Grid4DDataScalar< ScalarType >   data_T_;
     Kokkos::Random_XorShift64_Pool<> rand_pool_;
 
@@ -228,7 +243,7 @@ struct FVNoiseAdder
         auto             gen          = rand_pool_.get_state();
         const ScalarType eps          = 1e-1;
         const ScalarType perturbation = eps * ( 2.0 * gen.drand() - 1.0 );
-        data_T_( id, x, y, r )        = Kokkos::clamp( data_T_( id, x, y, r ) + perturbation, 0.0, 1.0 );
+        data_T_( id, x, y, r )        = Kokkos::clamp( data_T_( id, x, y, r ) + perturbation, T_min_, T_max_ );
         rand_pool_.free_state( gen );
     }
 };
@@ -367,7 +382,7 @@ Result<> run( const Parameters& prm )
         // Note that although we perform GCA we need some approximation of the viscosity for the
         // coarse grids for the weighting of the mass matrix.
         geophysics::viscosity::RadialProfileViscosityInterpolator viscosity_interpolator(
-            radial_viscosity_profile[level], prm.physics_params.viscosity_params.reference_viscosity );
+            radial_viscosity_profile[level], prm.physics_params.viscosity_params.viscosity );
         viscosity_interpolator.interpolate( eta[level].grid_data() );
     }
 
@@ -739,6 +754,8 @@ Result<> run( const Parameters& prm )
         FVInitialConditionInterpolator{
             domains[velocity_level].domain_info().radii().front(),
             domains[velocity_level].domain_info().radii().back(),
+            prm.boundary_params.temperature_min,
+            prm.boundary_params.temperature_max,
             fv_cell_centers.grid_data(),
             T_fct.grid_data() } );
 
@@ -747,7 +764,11 @@ Result<> run( const Parameters& prm )
     Kokkos::parallel_for(
         "adding noise to temp (FCT)",
         grid::shell::local_domain_md_range_policy_cells_fv_skip_ghost_layers( domains[velocity_level] ),
-        FVNoiseAdder{ T_fct.grid_data(), Kokkos::Random_XorShift64_Pool<>( 12345 ) } );
+        FVNoiseAdder{
+            prm.boundary_params.temperature_min,
+            prm.boundary_params.temperature_max,
+            T_fct.grid_data(),
+            Kokkos::Random_XorShift64_Pool<>( 12345 ) } );
 
     Kokkos::fence();
 
@@ -758,8 +779,8 @@ Result<> run( const Parameters& prm )
     // neighbour exists beyond a physical boundary).
 
     const fv::hex::DirichletBCs< ScalarType > fct_bcs{
-        .T_cmb         = static_cast< ScalarType >( prm.boundary_params.temperature_cmb ),
-        .T_surface     = static_cast< ScalarType >( prm.boundary_params.temperature_surface ),
+        .T_cmb         = static_cast< ScalarType >( prm.boundary_params.temperature_max ),
+        .T_surface     = static_cast< ScalarType >( prm.boundary_params.temperature_min ),
         .apply_cmb     = true,
         .apply_surface = true };
 
@@ -841,7 +862,24 @@ Result<> run( const Parameters& prm )
 
     logroot << "Writing initial XDMF ..." << std::endl;
 
-    xdmf_output.write();
+    if ( prm.devel_params.output_dimensional )
+    {
+        // Redimensionalise ...
+        scale( T.grid_data(), prm.boundary_params.delta_T_dimensional );
+        scale( u.block_1().grid_data(), prm.physics_params.calc_cm_per_year );
+        scale( eta[velocity_level].grid_data(), prm.physics_params.viscosity_params.reference_viscosity );
+
+        xdmf_output.write();
+
+        // ... and nondimensionalise again
+        scale( T.grid_data(), 1.0 / prm.boundary_params.delta_T_dimensional );
+        scale( u.block_1().grid_data(), 1.0 / prm.physics_params.calc_cm_per_year );
+        scale( eta[velocity_level].grid_data(), 1.0 / prm.physics_params.viscosity_params.reference_viscosity );
+    }
+    else
+    {
+        xdmf_output.write();
+    }
 
     logroot << "Writing initial radial profiles ..." << std::endl;
 
@@ -941,7 +979,7 @@ Result<> run( const Parameters& prm )
             fv_cell_centers.grid_data(),
             coords_shell[velocity_level],
             coords_radii[velocity_level],
-            prm.physics_params.diffusivity );
+            prm.physics_params.thermal_diffusivity );
         const auto dt = prm.time_stepping_params.dt_scaling * dt_stable;
 
         logroot << "Computing dt (FCT stable) ..." << std::endl;
@@ -957,9 +995,9 @@ Result<> run( const Parameters& prm )
 
                 {
                     util::Timer timer_fct_source_step( "fct_explicit_step_updating_source_term" );
-                    if ( prm.physics_params.constant_internal_heating )
+                    if ( prm.physics_params.internal_heating )
                     {
-                        linalg::assign( T_source, prm.physics_params.constant_internal_heating_value );
+                        linalg::assign( T_source, prm.physics_params.internal_heating_rate );
                     }
                     timer_fct_source_step.stop();
 
@@ -973,7 +1011,7 @@ Result<> run( const Parameters& prm )
                         coords_radii[velocity_level],
                         dt,
                         fv_fct_bufs,
-                        prm.physics_params.diffusivity,
+                        prm.physics_params.thermal_diffusivity,
                         T_source.grid_data(),
                         /*subtract_divergence=*/true,
                         boundary_mask_data[velocity_level],
@@ -1012,7 +1050,24 @@ Result<> run( const Parameters& prm )
 
         logroot << "Writing XDMF output and radial profiles ..." << std::endl;
 
-        xdmf_output.write();
+        if ( prm.devel_params.output_dimensional )
+        {
+            // Redimensionalise ...
+            scale( T.grid_data(), prm.boundary_params.delta_T_dimensional );
+            scale( u.block_1().grid_data(), prm.physics_params.calc_cm_per_year );
+            scale( eta[velocity_level].grid_data(), prm.physics_params.viscosity_params.reference_viscosity );
+
+            xdmf_output.write();
+
+            // ... and nondimensionalise again
+            scale( T.grid_data(), 1.0 / prm.boundary_params.delta_T_dimensional );
+            scale( u.block_1().grid_data(), 1.0 / prm.physics_params.calc_cm_per_year );
+            scale( eta[velocity_level].grid_data(), 1.0 / prm.physics_params.viscosity_params.reference_viscosity );
+        }
+        else
+        {
+            xdmf_output.write();
+        }
 
         compute_and_write_radial_profiles( T, subdomain_shell_idx, domains[velocity_level], prm.io_params, timestep );
         compute_and_write_radial_profiles(

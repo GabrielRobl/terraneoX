@@ -15,10 +15,18 @@ struct MeshParameters
     int refinement_level_mesh_max   = 4;
     int refinement_level_subdomains = 0;
 
-    double radius_min = 0.5;
-    double radius_max = 1.0;
+    double radius_min       = 0.5;
+    double radius_max       = 1.0;
+    double radius_surface   = 6371000.0;
+    double radius_cmb       = 3480000.0;
+    double mantle_thickness = 2891000.0;
 };
 
+struct PlateParameters
+{
+    int initial_plate_age = 400;
+    int final_plate_age   = 0;
+};
 struct BoundaryConditionsParameters
 {
     enum class VelocityBC
@@ -30,8 +38,15 @@ struct BoundaryConditionsParameters
     VelocityBC velocity_bc_cmb     = VelocityBC::NO_SLIP;
     VelocityBC velocity_bc_surface = VelocityBC::NO_SLIP;
 
-    double temperature_cmb     = 1.0;
-    double temperature_surface = 0.0;
+    double plate_velocity_scaling = 1.0;
+
+    double temperature_cmb     = 3800.0;
+    double temperature_surface = 300.0;
+    double delta_T_dimensional = temperature_cmb - temperature_surface;
+    double temperature_min     = 0.0;
+    double temperature_max     = 1.0;
+
+    PlateParameters plate_params{};
 };
 
 struct ViscosityParameters
@@ -40,18 +55,32 @@ struct ViscosityParameters
     std::string radial_profile_csv_filename  = "radial_viscosity_profile.csv";
     std::string radial_profile_radii_key     = "radii";
     std::string radial_profile_viscosity_key = "viscosity";
-    double      reference_viscosity          = 1.0;
+    double      reference_viscosity          = 1e23;
+    double      viscosity                    = 1.0;
 };
 
 struct PhysicsParameters
 {
-    double diffusivity     = 1.0;
-    double rayleigh_number = 1e5;
+    double gravity = 9.81;
 
-    ViscosityParameters viscosity_parameters{};
+    double thermal_diffusivity     = 1.0;
+    double rayleigh_number         = 1e5;
+    double peclet_number           = 1.0;
+    double dissipation_number      = 1.0;
+    double h_number                = 1.0;
+    double characteristic_velocity = 1e-10;
 
-    bool   constant_internal_heating       = false;
-    double constant_internal_heating_value = 1.0;
+    double reference_density      = 4500;
+    double thermal_expansivity    = 2.5e-5;
+    double thermal_conductivity   = 3.0;
+    double specific_heat_capacity = 1230;
+
+    bool   internal_heating      = false;
+    double internal_heating_rate = 1.0;
+
+    double calc_cm_per_year = 1.0;
+
+    ViscosityParameters viscosity_params{};
 };
 
 struct StokesSolverParameters
@@ -98,6 +127,13 @@ struct IOParameters
     int         checkpoint_step = -1;
 };
 
+// This struct holds options that might be useful for debugging, benchmarking, etc., but are not intended for 'standard' use.
+struct DeveloperOptions
+{
+    bool set_nondimensional_numbers = false;
+    bool output_dimensional         = true;
+};
+
 struct Parameters
 {
     MeshParameters               mesh_params;
@@ -107,12 +143,61 @@ struct Parameters
     PhysicsParameters            physics_params;
     TimeSteppingParameters       time_stepping_params;
     IOParameters                 io_params;
+    DeveloperOptions             devel_params;
 
     std::string output_config_file;
 };
 
 struct CLIHelp
 {};
+
+inline void nondimensionalise( Parameters& prm )
+{
+    auto& phys     = prm.physics_params;
+    auto& mesh     = prm.mesh_params;
+    auto& boundary = prm.boundary_params;
+    auto& devel    = prm.devel_params;
+
+    // --- Domain ---
+
+    // radius_max is unchanged from default, always 1.0 per construction
+    mesh.radius_min       = mesh.radius_cmb / mesh.radius_surface;
+    mesh.mantle_thickness = mesh.radius_surface - mesh.radius_cmb;
+
+    // --- Boundary conditions ---
+
+    boundary.temperature_min = boundary.temperature_surface / boundary.delta_T_dimensional;
+    boundary.temperature_max = boundary.temperature_cmb / boundary.delta_T_dimensional;
+
+    // Compute characteristic velocity and thermal diffusivity
+    phys.characteristic_velocity =
+        phys.thermal_conductivity / ( phys.reference_density * phys.specific_heat_capacity * mesh.mantle_thickness );
+
+    phys.thermal_diffusivity = phys.thermal_conductivity / ( phys.reference_density * phys.specific_heat_capacity );
+
+    // Precompute conversion factor from non-dim velocities to cm/a
+    phys.calc_cm_per_year = phys.characteristic_velocity * 60 * 60 * 24 * 365 * 100;
+
+    if ( !devel.set_nondimensional_numbers )
+    {
+        // Compute nondimensional numbers
+        // Rayleigh number = ( rho * alpha * g * L^3 * dT ) / ( eta * kappa )
+        phys.rayleigh_number = ( phys.reference_density * phys.gravity * phys.thermal_expansivity *
+                                 std::pow( mesh.mantle_thickness, 3 ) * boundary.delta_T_dimensional ) /
+                               ( phys.viscosity_params.reference_viscosity * phys.thermal_diffusivity );
+
+        // Peclet number = ( U * L ) / kappa -> should be 1
+        phys.peclet_number = ( phys.characteristic_velocity * mesh.mantle_thickness ) / phys.thermal_diffusivity;
+
+        // Dissipation number = ( alpha * g * L ) / Cp
+        phys.dissipation_number =
+            ( phys.thermal_expansivity * phys.gravity * mesh.mantle_thickness ) / phys.specific_heat_capacity;
+
+        // H-number = ( H * L ) / ( Cp * U * dT )
+        phys.h_number = ( phys.internal_heating_rate * mesh.mantle_thickness ) /
+                        ( phys.specific_heat_capacity * phys.characteristic_velocity * boundary.delta_T_dimensional );
+    }
+}
 
 inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int argc, char** argv )
 {
@@ -147,8 +232,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
     add_option_with_default( app, "--refinement-level-mesh-max", parameters.mesh_params.refinement_level_mesh_max )
         ->group( "Domain" );
 
-    add_option_with_default(
-        app, "--refinement-level-subdomains", parameters.mesh_params.refinement_level_subdomains )
+    add_option_with_default( app, "--refinement-level-subdomains", parameters.mesh_params.refinement_level_subdomains )
         ->group( "Domain" );
 
     add_option_with_default( app, "--radius-cmb", parameters.mesh_params.radius_cmb )->group( "Domain" );
@@ -173,32 +257,35 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         ->default_val( "noslip" )
         ->group( "Boundary Conditions" );
 
-    add_option_with_default(
-        app, "--velocity-bc-surface", parameters.boundary_params.velocity_bc_surface )
+    add_option_with_default( app, "--velocity-bc-surface", parameters.boundary_params.velocity_bc_surface )
         ->transform( CLI::CheckedTransformer( velocity_bc_surface_map, CLI::ignore_case ) )
         ->default_val( "noslip" )
         ->group( "Boundary Conditions" );
 
-    add_option_with_default(
-        app, "--temperature-bc-value-cmb", parameters.boundary_params.temperature_cmb )
+    add_option_with_default( app, "--temperature-cmb", parameters.boundary_params.temperature_cmb )
         ->group( "Boundary Conditions" );
 
-    add_option_with_default(
-        app, "--temperature-bc-value-surface", parameters.boundary_params.temperature_surface )
+    add_option_with_default( app, "--temperature-surface", parameters.boundary_params.temperature_surface )
         ->group( "Boundary Conditions" );
 
     //////////////////////////////
     /// (Geo-)Physical parameters ///
     //////////////////////////////
+    add_flag_with_default( app, "--internal-heating-enabled", parameters.physics_params.internal_heating );
+    add_option_with_default( app, "--internal-heating-rate", parameters.physics_params.internal_heating_rate );
 
-    add_option_with_default( app, "--diffusivity", parameters.physics_params.diffusivity );
-    add_option_with_default( app, "--rayleigh-number", parameters.physics_params.rayleigh_number );
+    add_option_with_default( app, "--reference-density", parameters.physics_params.reference_density );
+    add_option_with_default( app, "--thermal-expansivity", parameters.physics_params.thermal_expansivity );
+    add_option_with_default( app, "--thermal-conductivity", parameters.physics_params.thermal_conductivity );
+    add_option_with_default( app, "--specific-heat-capacity", parameters.physics_params.specific_heat_capacity );
 
+    // Viscosity parameters
+    add_option_with_default(
+        app, "--reference-viscosity", parameters.physics_params.viscosity_params.reference_viscosity )
+        ->group( "Viscosity" );
     const auto radial_profile_enabled =
         add_flag_with_default(
-            app,
-            "--viscosity-radial-profile",
-            parameters.physics_params.viscosity_params.radial_profile_enabled )
+            app, "--viscosity-radial-profile", parameters.physics_params.viscosity_params.radial_profile_enabled )
             ->group( "Viscosity" )
             ->description(
                 "Add this flag if you want to supply a radial viscosity profile. "
@@ -222,15 +309,6 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         parameters.physics_params.viscosity_params.radial_profile_viscosity_key )
         ->needs( radial_profile_enabled )
         ->group( "Viscosity" );
-    add_option_with_default(
-        app, "--viscosity-reference-value", parameters.physics_params.viscosity_params.reference_viscosity )
-        ->needs( radial_profile_enabled )
-        ->group( "Viscosity" );
-
-    add_flag_with_default(
-        app, "--constant-internal-heating-enabled", parameters.physics_params.constant_internal_heating );
-    add_option_with_default(
-        app, "--constant-internal-heating-value", parameters.physics_params.constant_internal_heating_value );
 
     ///////////////////////////
     /// Time discretization ///
@@ -243,8 +321,7 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
             "considerations. You can scale the computed dt using this value (e.g. set to 0.5 to half the estimated dt, "
             "set to 1.0 to just use the estimated dt)." )
         ->group( "Time Discretization" );
-    add_option_with_default( app, "--t-end", parameters.time_stepping_params.t_end )
-        ->group( "Time Discretization" );
+    add_option_with_default( app, "--t-end", parameters.time_stepping_params.t_end )->group( "Time Discretization" );
     add_option_with_default( app, "--max-timesteps", parameters.time_stepping_params.max_timesteps )
         ->group( "Time Discretization" )
         ->description(
@@ -325,6 +402,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
         }
         return { "CLI parse error" };
     }
+
+    // Nondimensionalise all relevant input parameters
+    nondimensionalise( parameters );
 
     util::logroot << "=========================================\n";
     util::logroot << "     Starting mantle circulation app     \n";
