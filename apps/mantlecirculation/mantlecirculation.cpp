@@ -848,11 +848,6 @@ Result<> run( const Parameters& prm )
             Kokkos::abort( success_temp.error().c_str() );
         }
 
-        // Setting XDMF to the same step as we have loaded.
-        // Thus, we will now re-write the loaded data.
-        // Maybe a good sanity check.
-        xdmf_output.set_write_counter( timestep_initial );
-
         // T_fct is not stored in checkpoints (only Q1 T is).  Recover the FV cell-average
         // field from the restored Q1 T via an L2 projection.  Ghost layers are populated
         // inside l2_project_fe_to_fv, so the result is immediately usable by FCT kernels.
@@ -860,14 +855,11 @@ Result<> run( const Parameters& prm )
             T_fct, T, domains[velocity_level], coords_shell[velocity_level], coords_radii[velocity_level] );
     }
 
-    logroot << "Writing initial XDMF ..." << std::endl;
-
-    if ( prm.devel_params.output_dimensional )
-    {
-        // Redimensionalise ...
-        scale( T.grid_data(), prm.boundary_params.delta_T_K );
-        scale( u.block_1().grid_data(), prm.physics_params.calc_cm_per_year );
-        scale( eta[velocity_level].grid_data(), prm.physics_params.viscosity_params.reference_viscosity );
+    // Setting XDMF to the same step as we have loaded and padding width according to max_timesteps.
+    // Thus, we will re-write loaded data.
+    // Maybe a good sanity check.
+    int pad_width = std::to_string( timestep_initial + prm.time_stepping_params.max_timesteps - 1 ).length();
+    xdmf_output->set_write_counter( timestep_initial, pad_width );
 
         xdmf_output.write();
 
