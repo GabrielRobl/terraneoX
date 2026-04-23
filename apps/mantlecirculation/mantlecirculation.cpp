@@ -313,7 +313,7 @@ Result<> run( const Parameters& prm )
 
     // Set up Stokes vectors for the finest grid.
 
-    const std::string label_stokes = "u";
+    const std::string label_stokes = "VelocityPressure";
 
     std::map< std::string, VectorQ1IsoQ2Q1< ScalarType > > stok_vecs;
     std::vector< std::string >                             stok_vec_names = { label_stokes, "f", "tmp" };
@@ -328,7 +328,7 @@ Result<> run( const Parameters& prm )
             ownership_mask_data[pressure_level] );
     }
 
-    auto& u = stok_vecs["u"];
+    auto& u = stok_vecs[label_stokes];
     auto& f = stok_vecs["f"];
 
     // Set up viscosity.
@@ -440,7 +440,7 @@ Result<> run( const Parameters& prm )
 
     // Set up vectors for energy equation.
 
-    const std::string label_temperature = "T";
+    const std::string label_temperature = "Temperature";
 
     std::map< std::string, VectorQ1Scalar< ScalarType > > temp_vecs;
     std::vector< std::string >                            temp_vec_names = { label_temperature, "q" };
@@ -457,7 +457,7 @@ Result<> run( const Parameters& prm )
             VectorQ1Scalar< ScalarType >( name, domains[velocity_level], ownership_mask_data[velocity_level] );
     }
 
-    auto& T = temp_vecs["T"];
+    auto& T = temp_vecs[label_temperature];
     auto& q = temp_vecs["q"];
 
     // Finite-volume functions/vectors.
