@@ -6,6 +6,7 @@
 
 #include "grid/grid_types.hpp"
 #include "grid/shell/spherical_shell.hpp"
+#include "io/xdmf.hpp"
 #include "linalg/vector_q1isoq2_q1.hpp"
 #include "parameters.hpp"
 #include "shell/radial_profiles.hpp"
@@ -33,6 +34,8 @@ using util::logroot;
 using util::Ok;
 using util::Result;
 
+using terra::kernels::common::scale;
+
 using ScalarType = double;
 
 namespace terra::mantlecirculation {
@@ -53,6 +56,56 @@ inline Result<> create_directories( const IOParameters& io_parameters )
     util::prepare_empty_directory( xdmf_dir );
     util::prepare_empty_directory( radial_profiles_dir );
     util::prepare_empty_directory( timer_trees_dir );
+
+    return { Ok{} };
+}
+
+inline Result<> write_xdmf(
+    std::optional< io::XDMFOutput< ScalarType > >& xdmf_output,
+    std::optional< io::XDMFOutput< ScalarType > >& xdmf_output_pressure,
+    const Parameters&                              prm,
+    Grid4DDataScalar< ScalarType >&                Temperature_data,
+    Grid4DDataVec< ScalarType, 3 >&                Velocity_data,
+    Grid4DDataScalar< ScalarType >&                Viscosity_data,
+    Grid4DDataScalar< ScalarType >&                Pressure_data )
+{
+    if ( prm.devel_params.output_dimensional )
+    {
+        // Redimensionalise ...
+        scale( Temperature_data, prm.boundary_params.delta_T_K );
+        scale( Velocity_data, prm.physics_params.calc_cm_per_year );
+        scale( Viscosity_data, prm.physics_params.viscosity_params.reference_viscosity );
+
+        xdmf_output->write();
+
+        // ... and nondimensionalise again.
+        scale( Temperature_data, 1.0 / prm.boundary_params.delta_T_K );
+        scale( Velocity_data, 1.0 / prm.physics_params.calc_cm_per_year );
+        scale( Viscosity_data, 1.0 / prm.physics_params.viscosity_params.reference_viscosity );
+
+        // Redim, write and nondim pressure
+        if ( xdmf_output_pressure )
+        {
+            scale(
+                Pressure_data,
+                ( prm.physics_params.viscosity_params.reference_viscosity *
+                  prm.physics_params.characteristic_velocity ) /
+                    prm.mesh_params.mantle_thickness_m );
+
+            xdmf_output_pressure->write();
+
+            scale(
+                Pressure_data,
+                prm.mesh_params.mantle_thickness_m / ( prm.physics_params.viscosity_params.reference_viscosity *
+                                                       prm.physics_params.characteristic_velocity ) );
+        }
+    }
+    else
+    {
+        xdmf_output->write();
+        if ( xdmf_output_pressure )
+            xdmf_output_pressure->write();
+    }
 
     return { Ok{} };
 }

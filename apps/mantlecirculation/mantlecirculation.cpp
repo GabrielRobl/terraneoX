@@ -806,15 +806,31 @@ Result<> run( const Parameters& prm )
 
     // Setting up XDMF output (serves for both checkpointing and visualization).
 
-    io::XDMFOutput xdmf_output(
+    // Initialize two XDMFOutput insances - one at the finest level (velocity_level) and a second optional one if pressure (at pressure_level) is written out.
+    // Both are created as std::optional objects so that access syntax remains uniform.
+    std::optional< io::XDMFOutput< ScalarType > > xdmf_output;
+    std::optional< io::XDMFOutput< ScalarType > > xdmf_output_pressure;
+
+    xdmf_output.emplace(
         prm.io_params.outdir + "/" + prm.io_params.xdmf_dir,
         domains[velocity_level],
         coords_shell[velocity_level],
         coords_radii[velocity_level] );
 
-    xdmf_output.add( T.grid_data() );
-    xdmf_output.add( u.block_1().grid_data() );
-    xdmf_output.add( eta[velocity_level].grid_data() );
+    xdmf_output->add( T.grid_data() );                   // Temperature
+    xdmf_output->add( u.block_1().grid_data() );         // Velocity
+    xdmf_output->add( eta[velocity_level].grid_data() ); // Viscosity
+
+    if ( prm.io_params.output_pressure )
+    {
+        xdmf_output_pressure.emplace(
+            prm.io_params.outdir + "/" + prm.io_params.xdmf_dir + "_p",
+            domains[pressure_level],
+            coords_shell[pressure_level],
+            coords_radii[pressure_level] );
+
+        xdmf_output_pressure->add( u.block_2().grid_data() ); // Pressure
+    }
 
     int timestep_initial = 0;
 
@@ -861,17 +877,17 @@ Result<> run( const Parameters& prm )
     int pad_width = std::to_string( timestep_initial + prm.time_stepping_params.max_timesteps - 1 ).length();
     xdmf_output->set_write_counter( timestep_initial, pad_width );
 
-        xdmf_output.write();
+    logroot << "Writing initial XDMF ..." << std::endl;
 
-        // ... and nondimensionalise again
-        scale( T.grid_data(), 1.0 / prm.boundary_params.delta_T_K );
-        scale( u.block_1().grid_data(), 1.0 / prm.physics_params.calc_cm_per_year );
-        scale( eta[velocity_level].grid_data(), 1.0 / prm.physics_params.viscosity_params.reference_viscosity );
-    }
-    else
-    {
-        xdmf_output.write();
-    }
+    // Write to xdmf
+    write_xdmf(
+        xdmf_output,
+        xdmf_output_pressure,
+        prm,
+        T.grid_data(),
+        u.block_1().grid_data(),
+        eta[velocity_level].grid_data(),
+        u.block_2().grid_data() );
 
     logroot << "Writing initial radial profiles ..." << std::endl;
 
@@ -1042,24 +1058,15 @@ Result<> run( const Parameters& prm )
 
         logroot << "Writing XDMF output and radial profiles ..." << std::endl;
 
-        if ( prm.devel_params.output_dimensional )
-        {
-            // Redimensionalise ...
-            scale( T.grid_data(), prm.boundary_params.delta_T_K );
-            scale( u.block_1().grid_data(), prm.physics_params.calc_cm_per_year );
-            scale( eta[velocity_level].grid_data(), prm.physics_params.viscosity_params.reference_viscosity );
-
-            xdmf_output.write();
-
-            // ... and nondimensionalise again
-            scale( T.grid_data(), 1.0 / prm.boundary_params.delta_T_K );
-            scale( u.block_1().grid_data(), 1.0 / prm.physics_params.calc_cm_per_year );
-            scale( eta[velocity_level].grid_data(), 1.0 / prm.physics_params.viscosity_params.reference_viscosity );
-        }
-        else
-        {
-            xdmf_output.write();
-        }
+        // Write to xdmf
+        write_xdmf(
+            xdmf_output,
+            xdmf_output_pressure,
+            prm,
+            T.grid_data(),
+            u.block_1().grid_data(),
+            eta[velocity_level].grid_data(),
+            u.block_2().grid_data() );
 
         compute_and_write_radial_profiles( T, subdomain_shell_idx, domains[velocity_level], prm.io_params, timestep );
         compute_and_write_radial_profiles(
