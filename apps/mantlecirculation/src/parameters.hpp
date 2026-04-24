@@ -26,8 +26,11 @@ struct MeshParameters
 
 struct PlateParameters
 {
-    int initial_plate_age = 400;
-    int final_plate_age   = 0;
+    bool apply_plate_velocities = false; // This does nothing yet
+    int  initial_plate_age      = 400;
+    int  final_plate_age        = 0;
+
+    double plate_velocity_scaling = 1.0;
 };
 struct BoundaryConditionsParameters
 {
@@ -39,8 +42,6 @@ struct BoundaryConditionsParameters
 
     VelocityBC velocity_bc_cmb     = VelocityBC::NO_SLIP;
     VelocityBC velocity_bc_surface = VelocityBC::NO_SLIP;
-
-    double plate_velocity_scaling = 1.0;
 
     // Nondimensional temperatures
     double temperature_min = 0.0;
@@ -59,7 +60,7 @@ struct ViscosityParameters
     std::string radial_profile_csv_filename  = "radial_viscosity_profile.csv";
     std::string radial_profile_radii_key     = "radii";
     std::string radial_profile_viscosity_key = "viscosity";
-    double      reference_viscosity          = 1e23;
+    double      reference_viscosity          = 1e22;
     double      viscosity                    = 1.0;
 };
 
@@ -84,7 +85,8 @@ struct PhysicsParameters
     bool   internal_heating      = false;
     double internal_heating_rate = 1.0;
 
-    double calc_cm_per_year = 1.0;
+    double calc_cm_per_year = 3e-4; // from non-dim velocity to cm/a
+    double calc_time_Ma     = 1e6;  // from non-dim time to Ma
 
     ViscosityParameters viscosity_params{};
 };
@@ -113,6 +115,7 @@ struct EnergySolverParameters
 struct TimeSteppingParameters
 {
     double dt_scaling = 0.5;
+    double t_end_Ma   = 100.0;
     double t_end      = 1.0;
 
     int max_timesteps = 10;
@@ -164,6 +167,7 @@ inline void nondimensionalise( Parameters& prm )
     auto& mesh     = prm.mesh_params;
     auto& boundary = prm.boundary_params;
     auto& devel    = prm.devel_params;
+    auto& time     = prm.time_stepping_params;
 
     // --- Domain ---
 
@@ -182,8 +186,18 @@ inline void nondimensionalise( Parameters& prm )
 
     phys.thermal_diffusivity = phys.thermal_conductivity / ( phys.reference_density * phys.specific_heat_capacity );
 
-    // Precompute conversion factor from non-dim velocities to cm/a
-    phys.calc_cm_per_year = phys.characteristic_velocity * 60 * 60 * 24 * 365 * 100;
+    // Precompute conversion factors from non-dim to dimensional quantities
+    phys.calc_cm_per_year = phys.characteristic_velocity * 60 * 60 * 24 * 365 * 100; // Velocity in cm/a
+
+    phys.calc_time_Ma = mesh.mantle_thickness_m / ( phys.calc_cm_per_year * 1e4 ); // Time in Ma
+    // Acount for plate velocity scaling
+    if ( boundary.plate_params.apply_plate_velocities )
+    {
+        phys.calc_time_Ma /= boundary.plate_params.plate_velocity_scaling;
+    }
+
+    // Nondimensionalise time
+    time.t_end = time.t_end_Ma / phys.calc_time_Ma;
 
     if ( !devel.set_nondimensional_numbers )
     {
@@ -328,7 +342,9 @@ inline util::Result< std::variant< CLIHelp, Parameters > > parse_parameters( int
             "considerations. You can scale the computed dt using this value (e.g. set to 0.5 to half the estimated dt, "
             "set to 1.0 to just use the estimated dt)." )
         ->group( "Time Discretization" );
-    add_option_with_default( app, "--t-end", parameters.time_stepping_params.t_end )->group( "Time Discretization" );
+    add_option_with_default( app, "--t-end", parameters.time_stepping_params.t_end_Ma )
+        ->group( "Time Discretization" )
+        ->description( "Final time in Ma." );
     add_option_with_default( app, "--max-timesteps", parameters.time_stepping_params.max_timesteps )
         ->group( "Time Discretization" )
         ->description(

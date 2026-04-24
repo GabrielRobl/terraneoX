@@ -896,7 +896,8 @@ Result<> run( const Parameters& prm )
     compute_and_write_radial_profiles(
         eta[velocity_level], subdomain_shell_idx, domains[velocity_level], prm.io_params, timestep_initial );
 
-    ScalarType simulated_time = 0.0;
+    ScalarType simulated_time    = 0.0;
+    ScalarType simulated_time_Ma = 0.0;
 
     // We need some global h. Let's, for simplicity (does not need to be too accurate) just choose the smallest h in
     // radial direction.
@@ -990,9 +991,10 @@ Result<> run( const Parameters& prm )
             prm.physics_params.thermal_diffusivity );
         const auto dt = prm.time_stepping_params.dt_scaling * dt_stable;
 
-        logroot << "Computing dt (FCT stable) ..." << std::endl;
-        logroot << "    dt_stable:                     " << dt_stable << std::endl;
-        logroot << "=>  dt (= dt_stable * dt_scaling): " << dt << std::endl;
+        logroot << "Computing dt (FCT stable) ..."
+                << "\n";
+        logroot << "    dt_stable:                     " << dt_stable * prm.physics_params.calc_time_Ma << " Ma\n";
+        logroot << "=>  dt (= dt_stable * dt_scaling): " << dt * prm.physics_params.calc_time_Ma << " Ma" << std::endl;
 
         {
             util::Timer timer_fct_substeps( "fct_substeps" );
@@ -1073,9 +1075,13 @@ Result<> run( const Parameters& prm )
             eta[velocity_level], subdomain_shell_idx, domains[velocity_level], prm.io_params, timestep );
 
         simulated_time += prm.time_stepping_params.energy_substeps * dt;
+        simulated_time_Ma = simulated_time * prm.physics_params.calc_time_Ma;
 
-        logroot << "Simulated time: " << simulated_time << " (stopping at " << prm.time_stepping_params.t_end
-                << ", we're at " << simulated_time / prm.time_stepping_params.t_end * 100.0 << "%)" << std::endl;
+        logroot << "Simulated time: " << simulated_time_Ma << " Ma\n";
+        logroot << "  Stopping at " << prm.time_stepping_params.t_end_Ma << " Ma, "
+                << std::round( simulated_time_Ma / prm.time_stepping_params.t_end_Ma * 100.0 * 10.0 ) / 10.0
+                << "% done.\n";
+        logroot << std::endl;
 
         write_timer_tree( prm.io_params, timestep );
 
