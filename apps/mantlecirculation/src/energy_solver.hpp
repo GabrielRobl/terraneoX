@@ -215,7 +215,8 @@ class SUPGSolver : public EnergySolver< ScalarType >
         util::logroot << "Computing dt (SUPG advection CFL) ..." << std::endl;
         util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
                       << std::endl;
-        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
+        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.mantle_thickness_m
+                      << std::endl;
         util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
                       << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma" << std::endl;
         if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
@@ -490,7 +491,8 @@ class EVSolver : public EnergySolver< ScalarType >
         util::logroot << "Computing dt (EV advection CFL) ..." << std::endl;
         util::logroot << "    max_vel (cm/a) :             " << max_vel * prm_.physics_parameters.calc_cm_per_year
                       << std::endl;
-        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.radius_surface_m << std::endl;
+        util::logroot << "    h (m) :                      " << h_ * prm_.mesh_parameters.mantle_thickness_m
+                      << std::endl;
         util::logroot << "    cfl timestep size (= dt_scaling * h/v_max): "
                       << dt_cfl * prm_.physics_parameters.calc_time_Ma << " Ma " << std::endl;
         if ( dt_cfl > prm_.time_stepping_parameters.dt_max )
