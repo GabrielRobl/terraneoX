@@ -15,6 +15,9 @@
 
 namespace terra::fe::wedge::operators::shell {
 
+template <typename ScalarT>
+using GravityCoeffStdFunctionType = std::function< ScalarT(const dense::Vec< ScalarT, 3 >&, const dense::Vec< ScalarT, 3 >&) >;
+
 /// \brief Entropy-viscosity stabilization for the advection-diffusion equation.
 ///
 /// Implements the scheme from Kronbichler, Heister & Bangerth (GJI 191, 2012),
@@ -332,19 +335,21 @@ EntropyStats< ScalarT > compute_entropy_stats(
 ///   Lap(q) = Σ_j N_j(q) · lap_w[wedge](j).
 template < typename ScalarT >
 void compute_nu_h(
-    grid::Grid5DDataScalar< ScalarT >&                           nu_h_wedge,
-    const linalg::VectorQ1Scalar< ScalarT >&                     T_n,
-    const linalg::VectorQ1Scalar< ScalarT >&                     T_nm1,
-    const linalg::VectorQ1Vec< ScalarT, 3 >&                     u,
-    const grid::Grid4DDataScalar< ScalarT >&                     lap_data,
-    const grid::shell::DistributedDomain&                        domain,
-    const grid::Grid3DDataVec< ScalarT, 3 >&                     grid_coords,
-    const grid::Grid2DDataScalar< ScalarT >&                     radii,
-    ScalarT                                                      dt,
-    const EntropyStats< ScalarT >&                               stats,
-    const EntropyViscosityParameters< ScalarT >&                 params,
-    ScalarT                                                      gamma = ScalarT( 0 ),
-    const bool                                                   shear_heating_switch = false )
+    grid::Grid5DDataScalar< ScalarT >&           nu_h_wedge,
+    const linalg::VectorQ1Scalar< ScalarT >&     T_n,
+    const linalg::VectorQ1Scalar< ScalarT >&     T_nm1,
+    const linalg::VectorQ1Vec< ScalarT, 3 >&     u,
+    const grid::Grid4DDataScalar< ScalarT >&     lap_data,
+    const grid::shell::DistributedDomain&        domain,
+    const grid::Grid3DDataVec< ScalarT, 3 >&     grid_coords,
+    const grid::Grid2DDataScalar< ScalarT >&     radii,
+    ScalarT                                      dt,
+    const EntropyStats< ScalarT >&               stats,
+    const EntropyViscosityParameters< ScalarT >& params,
+    ScalarT                                      gamma = ScalarT( 0 ),
+    const bool                                   compressible_switch = false,
+    const GravityCoeffStdFunctionType<ScalarT>   u_dot_g_coeff_func = nullptr,
+    const bool                                   shear_heating_switch = false )
 {
     const auto T_data = T_n.grid_data();
     const auto T_prev = T_nm1.grid_data();
@@ -468,6 +473,7 @@ void compute_nu_h(
 
                     ScalarT shear_heating_strong = 0.0;
 
+                    if( shear_heating_switch )
                     {
                         const ScalarT uxx = grad_u_q(0)(1);
                         const ScalarT uxy = grad_u_q(0)(1);
@@ -487,6 +493,33 @@ void compute_nu_h(
                                                ( 2.0 / 9.0 ) * ( uxx - 2 * uyy + uzz ) * ( uxx - 2.0 * uyy + uzz ) +
                                                ( 2.0 / 9.0 ) * ( uxx + uyy - 2 * uzz ) * ( uxx + uyy - 2.0 * uzz );
                     }
+
+                    ScalarT compressible_term = 0.0;
+
+                    if( compressible_switch )
+                    {
+                        if( u_dot_g_coeff_func == nullptr )
+                        {
+                            Kokkos::abort("Compressible switch is on but u_dot_g_coeff_func is nullptr");
+                        }
+                        else
+                        {
+                            compressible_term = u_dot_g_coeff_func(
+                                forward_map(
+                                    wedge_phy_surf[wedge][0], 
+                                    wedge_phy_surf[wedge][1], 
+                                    wedge_phy_surf[wedge][2], 
+                                    r_1, 
+                                    r_2, 
+                                    qp[q](0), 
+                                    qp[q](1), 
+                                    qp[q](2)
+                                ),
+                                u_q
+                            );
+                        }
+                    }
+
                     // KHB 2012 residual (page 7, formula above eq. 16):
                     //   r_E = ∂_t E + (T − T_m)·(u·∇T − κ∇²T − γ).
                     // The (T − T_m) factor multiplies the entire RHS of the
@@ -498,6 +531,7 @@ void compute_nu_h(
                         dT * ( 
                             u_dot_gradT + 
                             Lap_q - 
+                            ( compressible_switch ? compressible_term : 0.0 ) -
                             gamma_ - 
                             ( shear_heating_switch ? shear_heating_strong : 0.0 )
                         ) );

@@ -11,6 +11,7 @@
 #include "fe/wedge/operators/shell/mass.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg_kerngen.hpp"
+#include "terra/kernels/common/grid_operations.hpp"
 #include "fe/wedge/linearforms/shell/shear_heating_term.hpp"
 #include "fe/wedge/operators/shell/wedge_constant_div_k_grad.hpp"
 #include "fv/hex/conversion.hpp"
@@ -370,7 +371,7 @@ class SUPGSolver : public EnergySolver< ScalarType >
 /// Implicit Galerkin energy solve with explicit lagged entropy-viscosity
 /// stabilization (KHB / ASPECT recipe).  LHS is pure-Galerkin AD (SUPG OFF);
 /// stabilization is added to the RHS as `-dt · DivKGrad(ν_h) · T^n`.
-template < typename ScalarType >
+template < typename ScalarType, typename GravityCoeffInterpolatorType = std::nullptr_t >
 class EVSolver : public EnergySolver< ScalarType >
 {
     using AD_EV        = fe::wedge::operators::shell::UnsteadyAdvectionDiffusionSUPGKerngen< ScalarType >;
@@ -980,6 +981,57 @@ class EVSolver : public EnergySolver< ScalarType >
                 linalg::assign( rhs_ev_, gamma );
                 linalg::apply( *M_, rhs_ev_, tmp_ );
                 linalg::lincomb( q_, { ScalarType( 1 ), dt }, { q_, tmp_ } );
+            }
+
+            if( compressible_switch_ )
+            {
+                if constexpr( std::is_same_v<GravityCoeffInterpolatorType, std::nullptr_t> )
+                {
+                    Kokkos::abort("Compressible switch is on, but GravityInterpolatorType is not passed in");
+                }
+                else
+                {
+                    /////////////////////////////////////////////////
+                    // rhs_ev_ buffer is used as a temporary here! //
+                    /////////////////////////////////////////////////
+
+                    Kokkos::parallel_for(
+                    "gravity_x_interpolation",
+                    local_domain_md_range_policy_nodes( *domain_ ),
+                    GravityCoeffInterpolatorType( coords_shell_, coords_radii_, rhs_ev_.grid_data(), 0u ) );
+
+                    terra::kernels::common::mult_elementwise_inplace(rhs_ev_.grid_data(), velocity_.grid_data().comp_[0]);
+                    terra::kernels::common::mult_elementwise_inplace(rhs_ev_.grid_data(), T_.grid_data());
+                    
+                    linalg::apply( *M_, rhs_ev_, tmp_ );
+                    linalg::lincomb( q_, { ScalarType( 1 ), dt }, { q_, tmp_ } );
+
+                    ////////////////////////////////////////////////////////
+
+                    Kokkos::parallel_for(
+                    "gravity_y_interpolation",
+                    local_domain_md_range_policy_nodes( *domain_ ),
+                    GravityCoeffInterpolatorType( coords_shell_, coords_radii_, rhs_ev_.grid_data(), 1u ) );
+
+                    terra::kernels::common::mult_elementwise_inplace(rhs_ev_.grid_data(), velocity_.grid_data().comp_[0]);
+                    terra::kernels::common::mult_elementwise_inplace(rhs_ev_.grid_data(), T_.grid_data());
+                    
+                    linalg::apply( *M_, rhs_ev_, tmp_ );
+                    linalg::lincomb( q_, { ScalarType( 1 ), dt }, { q_, tmp_ } );
+
+                    ////////////////////////////////////////////////////////
+                    
+                    Kokkos::parallel_for(
+                    "gravity_z_interpolation",
+                    local_domain_md_range_policy_nodes( *domain_ ),
+                    GravityCoeffInterpolatorType( coords_shell_, coords_radii_, rhs_ev_.grid_data(), 2u ) );
+
+                    terra::kernels::common::mult_elementwise_inplace(rhs_ev_.grid_data(), velocity_.grid_data().comp_[0]);
+                    terra::kernels::common::mult_elementwise_inplace(rhs_ev_.grid_data(), T_.grid_data());
+                    
+                    linalg::apply( *M_, rhs_ev_, tmp_ );
+                    linalg::lincomb( q_, { ScalarType( 1 ), dt }, { q_, tmp_ } );
+                }
             }
 
             if( shear_heating_switch_ )
