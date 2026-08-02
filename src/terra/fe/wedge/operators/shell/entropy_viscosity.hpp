@@ -343,7 +343,8 @@ void compute_nu_h(
     ScalarT                                                      dt,
     const EntropyStats< ScalarT >&                               stats,
     const EntropyViscosityParameters< ScalarT >&                 params,
-    ScalarT                                                      gamma = ScalarT( 0 ) )
+    ScalarT                                                      gamma = ScalarT( 0 ),
+    const bool                                                   shear_heating_switch = false )
 {
     const auto T_data = T_n.grid_data();
     const auto T_prev = T_nm1.grid_data();
@@ -422,6 +423,15 @@ void compute_nu_h(
                     ScalarT                  Lap_q = 0;
                     dense::Vec< ScalarT, 3 > u_q{};
                     dense::Vec< ScalarT, 3 > grad_T_q{};
+                    dense::Vec<dense::Vec< ScalarT, 3 >, 3> grad_u_q{};
+
+                    for ( int di = 0; di < 3; ++di )
+                    {
+                        for ( int dj = 0; dj < 3; ++dj )
+                        {
+                            grad_u_q(di)(dj) = 0.0;
+                        }
+                    }
 
                     for ( int j = 0; j < num_nodes_per_wedge; ++j )
                     {
@@ -437,6 +447,14 @@ void compute_nu_h(
                             u_q( d )      += N_j * u_w[wedge][d]( j );
                             grad_T_q( d ) += T_w[wedge]( j ) * grad_phys( d );
                         }
+
+                        for ( int di = 0; di < 3; ++di )
+                        {
+                            for ( int dj = 0; dj < 3; ++dj )
+                            {
+                                grad_u_q(di)(dj) += u_w[wedge][di]( j ) * grad_phys( dj );
+                            }
+                        }
                     }
 
                     // Strong-form residual at the quad point.
@@ -445,16 +463,44 @@ void compute_nu_h(
                     const ScalarT E      = ScalarT( 0.5 ) * dT   * dT;
                     const ScalarT Ep     = ScalarT( 0.5 ) * dT_p * dT_p;
                     const ScalarT dE_dt  = ( E - Ep ) * inv_dt;
-                    const ScalarT u_dot_g =
+                    const ScalarT u_dot_gradT =
                         u_q( 0 ) * grad_T_q( 0 ) + u_q( 1 ) * grad_T_q( 1 ) + u_q( 2 ) * grad_T_q( 2 );
+
+                    ScalarT shear_heating_strong = 0.0;
+
+                    {
+                        const ScalarT uxx = grad_u_q(0)(1);
+                        const ScalarT uxy = grad_u_q(0)(1);
+                        const ScalarT uxz = grad_u_q(0)(2);
+                        
+                        const ScalarT uyx = grad_u_q(1)(0);
+                        const ScalarT uyy = grad_u_q(1)(1);
+                        const ScalarT uyz = grad_u_q(1)(2);
+
+                        const ScalarT uzx = grad_u_q(2)(0);
+                        const ScalarT uzy = grad_u_q(2)(1);
+                        const ScalarT uzz = grad_u_q(2)(2);
+                        
+                        shear_heating_strong = ( uxy + uyx ) * ( uxy + uyx ) + ( uxz + uzx ) * ( uxz + uzx ) +
+                                               ( uyz + uzy ) * ( uyz + uzy ) +
+                                               ( 2.0 / 9.0 ) * ( -2 * uxx + uyy + uzz ) * ( -2.0 * uxx + uyy + uzz ) +
+                                               ( 2.0 / 9.0 ) * ( uxx - 2 * uyy + uzz ) * ( uxx - 2.0 * uyy + uzz ) +
+                                               ( 2.0 / 9.0 ) * ( uxx + uyy - 2 * uzz ) * ( uxx + uyy - 2.0 * uzz );
+                    }
                     // KHB 2012 residual (page 7, formula above eq. 16):
                     //   r_E = ∂_t E + (T − T_m)·(u·∇T − κ∇²T − γ).
                     // The (T − T_m) factor multiplies the entire RHS of the
                     // T-PDE residual.  Vanishes on smooth solutions of the
                     // temperature equation.
                     // Lap_q already encodes −κ∇²T (lumped-mass-projected).
-                    const ScalarT r_E_q =
-                        Kokkos::abs( dE_dt + dT * ( u_dot_g + Lap_q - gamma_ ) );
+                    const ScalarT r_E_q = Kokkos::abs(
+                        dE_dt +
+                        dT * ( 
+                            u_dot_gradT + 
+                            Lap_q - 
+                            gamma_ - 
+                            ( shear_heating_switch ? shear_heating_strong : 0.0 )
+                        ) );
 
                     r_E_sq_int += qw[q] * abs_det * r_E_q * r_E_q;
                     u_max_norm = Kokkos::max( u_max_norm, u_q.norm() );

@@ -1,7 +1,7 @@
 #include "../src/terra/communication/shell/communication.hpp"
 #include "fe/strong_algebraic_dirichlet_enforcement.hpp"
 #include "fe/wedge/integrands.hpp"
-#include "fe/wedge/operators/shell/shear_heating_simple.hpp"
+#include "fe/wedge/linearforms/shell/shear_heating_term.hpp"
 #include "linalg/solvers/pcg.hpp"
 #include "linalg/solvers/richardson.hpp"
 #include "terra/dense/mat.hpp"
@@ -154,14 +154,21 @@ int main( int argc, char** argv )
 
     VectorQ1Scalar< ScalarType > f_dst( "f_dst", domain, mask_data );
 
-    using ShearHeatingOperator = fe::wedge::operators::shell::ShearHeatingSimple< ScalarType >;
+    std::function< ScalarType(const dense::Vec< double, 3 >&) > coeff_func = [](const dense::Vec< double, 3>&)
+    {
+        return 0.1;
+    };
+
+    using ShearHeatingOperator = terra::fe::wedge::linearforms::shell::ShearHeatingTerm< double >;
 
     ShearHeatingOperator shear_heating_operator(
         domain,
         coords_shell,
         coords_radii,
-        mu.grid_data(),
-        velocity.grid_data()
+        mu,
+        velocity,
+        linalg::OperatorApplyMode::Replace,
+        linalg::OperatorCommunicationMode::CommunicateAdditively
         // ux.grid_data(),
         // uy.grid_data(),
         // uz.grid_data() 
@@ -202,7 +209,7 @@ int main( int argc, char** argv )
     //     local_domain_md_range_policy_nodes( domain ),
     //     UzInterpolator( coords_shell, coords_radii, uz.grid_data(), false ) );
 
-    linalg::apply( shear_heating_operator, T_h, f_dst );
+    linalg::apply( shear_heating_operator, f_dst );
 
     const auto shear_heating_integral_analytical =
         14.5 * ( 4.0 / 5.0 ) * M_PI * ( rMax * rMax * rMax * rMax * rMax - rMin * rMin * rMin * rMin * rMin );
@@ -210,14 +217,14 @@ int main( int argc, char** argv )
 
     const auto shear_heating_integral_error = std::abs( shear_heating_integral - shear_heating_integral_analytical );
 
+    // std::cout << "shear_heating_integral_analytical = " << shear_heating_integral_analytical << std::endl;
+    // std::cout << "shear_heating_integral            = " << shear_heating_integral << std::endl;
+    // std::cout << "shear_heating_integral_error      = " << shear_heating_integral_error << std::endl;
+
     if ( shear_heating_integral_error > 0.025 )
     {
         Kokkos::abort( "Integration error too high!" );
     }
-
-    // std::cout << "shear_heating_integral_analytical = " << shear_heating_integral_analytical << std::endl;
-    // std::cout << "shear_heating_integral            = " << shear_heating_integral << std::endl;
-    // std::cout << "shear_heating_integral_error      = " << shear_heating_integral_error << std::endl;
 
     return 0;
 }

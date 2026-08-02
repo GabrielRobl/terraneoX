@@ -11,6 +11,7 @@
 #include "fe/wedge/operators/shell/mass.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg.hpp"
 #include "fe/wedge/operators/shell/unsteady_advection_diffusion_supg_kerngen.hpp"
+#include "fe/wedge/linearforms/shell/shear_heating_term.hpp"
 #include "fe/wedge/operators/shell/wedge_constant_div_k_grad.hpp"
 #include "fv/hex/conversion.hpp"
 #include "fv/hex/operators/fct_advection_diffusion.hpp"
@@ -377,6 +378,9 @@ class EVSolver : public EnergySolver< ScalarType >
     using EVDiffOp     = fe::wedge::operators::shell::WedgeConstantDivKGrad< ScalarType >;
     using DiagSolverT  = linalg::solvers::DiagonalSolver< AD_EV >;
     using FGMRESDouble = linalg::solvers::FGMRES< AD_EV, DiagSolverT >;
+
+    using ShearHeatingT = fe::wedge::linearforms::shell::ShearHeatingTerm< ScalarType >;
+
     // Reduced-precision Krylov basis variant (operator stays double). FP16 storage
     // (native __half on HIP): basis is store-only + convert, so no half arithmetic.
     using BasisVecT   = linalg::VectorQ1Scalar< Kokkos::Experimental::bhalf_t >;
@@ -390,6 +394,9 @@ class EVSolver : public EnergySolver< ScalarType >
         const grid::Grid4DDataScalar< grid::shell::ShellBoundaryFlag >& boundary_mask,
         const grid::Grid4DDataScalar< grid::NodeOwnershipFlag >&        ownership_mask,
         const linalg::VectorQ1Vec< ScalarType, 3 >&                     velocity,
+        const linalg::VectorQ1Scalar< ScalarType >&                     eta_times_shrcoeff,
+        const bool                                                      shear_heating_switch,
+        const bool                                                      compressible_switch,
         linalg::VectorQ1Scalar< ScalarType >&                           T,
         ScalarType                                                      h,
         const Parameters&                                               prm,
@@ -400,6 +407,8 @@ class EVSolver : public EnergySolver< ScalarType >
     , boundary_mask_( boundary_mask )
     , ownership_mask_( ownership_mask )
     , velocity_( velocity )
+    , shear_heating_switch_( shear_heating_switch )
+    , compressible_switch_( compressible_switch )
     , T_( T )
     , h_( h )
     , prm_( prm )
@@ -474,6 +483,14 @@ class EVSolver : public EnergySolver< ScalarType >
         A_neumann_diag_->set_supg_enabled( false );
 
         M_ = std::make_unique< TempMass >( *domain_, coords_shell_, coords_radii_, false );
+
+        shear_heating_ = std::make_unique< ShearHeatingT >(
+            *domain_,
+            coords_shell_,
+            coords_radii_,
+            eta_times_shrcoeff,
+            velocity_
+        );
 
         // Global Galerkin Laplacian for κ∇²T projection.  κ is spatially uniform
         // (a single physics parameter), so we use the constant-coefficient
@@ -939,7 +956,8 @@ class EVSolver : public EnergySolver< ScalarType >
                     dt,
                     stats,
                     ev_params_,
-                    gamma );
+                    gamma,
+                    shear_heating_switch_ );
             }
             if ( i == 0 )
             {
@@ -961,6 +979,13 @@ class EVSolver : public EnergySolver< ScalarType >
             {
                 linalg::assign( rhs_ev_, gamma );
                 linalg::apply( *M_, rhs_ev_, tmp_ );
+                linalg::lincomb( q_, { ScalarType( 1 ), dt }, { q_, tmp_ } );
+            }
+
+            if( shear_heating_switch_ )
+            {
+                // Apply shear heating using the same rhs_ev buffer
+                linalg::apply( *shear_heating_, tmp_ );
                 linalg::lincomb( q_, { ScalarType( 1 ), dt }, { q_, tmp_ } );
             }
 
@@ -1023,6 +1048,11 @@ class EVSolver : public EnergySolver< ScalarType >
     bool                            use_float_basis_ = false;
     std::unique_ptr< FGMRESDouble > solver_double_;
     std::unique_ptr< FGMRESFloat >  solver_float_;
+
+    std::unique_ptr< ShearHeatingT > shear_heating_;
+
+    const bool shear_heating_switch_ = false;
+    const bool compressible_switch_  = false;
 
     linalg::VectorQ1Scalar< ScalarType >                                  g_, tmp_, q_, diag_;
     linalg::VectorQ1Scalar< ScalarType >                                  T_prev_;
